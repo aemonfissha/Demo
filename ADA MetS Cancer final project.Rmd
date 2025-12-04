@@ -1,6 +1,6 @@
 ---
 title: "ADA MetS Cancer final project"
-author: "Aemon"
+author: "Aemon Fissha"
 date: "2025-11-24"
 output: html_document
 ---
@@ -573,12 +573,6 @@ janitor::tabyl(nhanes_analytic$mets_count4)
 janitor::tabyl(nhanes_analytic$mets4)
 
 ```
-
-## Estimate survey weighted prevalence of metabolic syndrome (4 component definition)
-```{r}
-survey::svymean(~mets4, nhanes_design, na.rm = TRUE)
-
-```
 # Re-create survey design object after adding MetS variables
 ```{r}
 
@@ -1078,62 +1072,6 @@ table1_long %>% head()
 
 ```
 
-# Here I am reshaping to a wide format with separate columns for MetS vs No MetS
-```{r}
-table1_wide <- table1_long %>%
-  tidyr::pivot_wider(
-    id_cols  = c(variable, level),
-    names_from  = mets_status,
-    values_from = c(n_unw, prop_pct),
-    names_glue  = "{mets_status} ({.value})"
-  ) %>%
-  arrange(factor(variable, levels = vars_cat), level) %>%
-  clean_names()
-
-table1_wide
-
-```
-
-```{r}
-names(table1_wide)
-```
-
-```{r}
-# Here I am creating a manuscript-style Table 1: n (percent) by MetS status
-table1_pretty <- table1_long %>%
-  mutate(
-    group_label = if_else(
-      mets_status == "no_met_s_0_2",
-      "No MetS (0–2 components)",
-      "MetS (≥3 of 4 components)"
-    ),
-    cell = sprintf("%d (%.1f)", n_unw, prop_pct)
-  ) %>%
-  select(variable, level, group_label, cell) %>%
-  tidyr::pivot_wider(
-    names_from  = group_label,
-    values_from = cell
-  ) %>%
-  arrange(factor(variable, levels = vars_cat), level) %>%
-  group_by(variable) %>%
-  mutate(
-    # show the variable name only for the first row of each block
-    variable = if_else(dplyr::row_number() == 1L, variable, "")
-  ) %>%
-  ungroup()
-
-table1_pretty
-
-```
-
-```{r}
-knitr::kable(
-  table1_pretty,
-  caption = "Table 1. Participant characteristics by metabolic syndrome status (NHANES 2021–2023)"
-)
-
-```
-
 # Here I am adding formal tests for Table 1
 ```{r}
 ## 1a. Rao–Scott chi-square tests for categorical variables
@@ -1246,130 +1184,10 @@ risk_diff_pct
 
 ```
 
-```{r}
-risk_summary <- tibble::tibble(
-  profile      = "Example profile: [fill in your age group, sex, race]",
-  risk_no_mets = pred_table$pred_risk_pct[pred_table$mets4_imp == 0],
-  risk_mets    = pred_table$pred_risk_pct[pred_table$mets4_imp == 1],
-  abs_diff_pct = as.numeric(risk_diff_pct)
-)
-
-risk_summary
-
-```
-
-```{r}
-install.packages("gtsummary")
-
-```
-```{r}
-install.packages(c("rlang", "remotes"))
-install.packages("gtsummary")
-```
-
-```{r}
-library(survey)
-library(gtsummary)
-library(dplyr)
-
-# make sure labeled MetS factor is in the design
-nhanes_design_imp <- update(
-  nhanes_design_imp,
-  mets4_imp_f = factor(
-    mets4_imp,
-    levels = c(0, 1),
-    labels = c("No MetS (0–2 components)",
-               "MetS (≥3 of 4 components)")
-  )
-)
-
-table1_mets <-
-  tbl_svysummary(
-    data   = nhanes_design_imp,
-    by     = mets4_imp_f,
-    include = c(
-      age_cat,
-      sex,
-      race4,
-      bmi_cat,
-      educ4,
-      smoke3,
-      cancer_any
-    ),
-    missing  = "no",
-    label = list(
-      age_cat    ~ "Age group (years)",
-      sex        ~ "Sex",
-      race4      ~ "Race and ethnicity",
-      bmi_cat    ~ "Body mass index category",
-      educ4      ~ "Education level",
-      smoke3     ~ "Smoking status",
-      cancer_any ~ "Any cancer diagnosis"
-    ),
-    statistic = all_categorical() ~ "{n} ({p}%)"
-  ) %>%
-  # just use defaults – this will use the survey chi-square internally
-  add_p() %>% 
-  modify_caption(
-    "**Table 1. Survey weighted characteristics of adults by metabolic syndrome status (4-component definition)**"
-  ) %>%
-  modify_header(
-    label ~ "**Characteristic**",
-    all_stat_cols() ~ "**{level}**"
-  ) %>%
-  modify_spanning_header(
-    all_stat_cols() ~ "**Metabolic syndrome status**"
-  ) %>%
-  bold_labels()
-
-table1_mets
-```
 
 #In survey-weighted analyses, adults with metabolic syndrome were substantially older than those without metabolic syndrome, with more than half of MetS cases aged 60 years or older compared with about one fifth among those without MetS (p < 0.001). The sex distribution was similar across groups (about 50 percent female in both, p > 0.9). MetS was more common among Non-Hispanic White adults and less common among Hispanic and Other race groups (p < 0.001). Obesity clustered strongly with MetS; 62 percent of adults with MetS had obesity versus 30 percent among those without MetS (p < 0.001). Adults with MetS had lower educational attainment and were more likely to be former smokers (both p < 0.001). Cancer prevalence was markedly higher among adults with MetS than those without MetS (19 percent vs 8 percent, p < 0.001).
 
-```{r}
-library(survey)
-library(broom)
 
-# MetS x sex interaction model
-nhanes_logit_int_sex <- svyglm(
-  cancer_any ~ mets4_imp * sex + age_cat + race4,
-  design = nhanes_design_imp,
-  family = quasibinomial()
-)
-
-summary(nhanes_logit_int_sex)
-```
-
-```{r}
-or_int_sex <- broom::tidy(
-  nhanes_logit_int_sex,
-  conf.int = TRUE,
-  exponentiate = TRUE
-)
-or_int_sex
-
-```
-
-```{r}
-# Men
-nhanes_logit_mets_male <- svyglm(
-  cancer_any ~ mets4_imp + age_cat + race4,
-  design = subset(nhanes_design_imp, sex == "Male"),
-  family = quasibinomial()
-)
-
-# Women
-nhanes_logit_mets_female <- svyglm(
-  cancer_any ~ mets4_imp + age_cat + race4,
-  design = subset(nhanes_design_imp, sex == "Female"),
-  family = quasibinomial()
-)
-
-broom::tidy(nhanes_logit_mets_male, conf.int = TRUE, exponentiate = TRUE)
-broom::tidy(nhanes_logit_mets_female, conf.int = TRUE, exponentiate = TRUE)
-
-```
 
 ## Table 1: Weighted characteristics of the analytic sample (Observed Data)
 ```{r}
@@ -1443,8 +1261,9 @@ table1_mets %>%
   flextable::save_as_docx(path = "table1_mets.docx")
 ```
 
+## Making my Table 1: Weighted characteristics of the analytic sample (Observed Data)
 ```{r}
-# Only run these once in the Console, not every knit
+
 # install.packages("gtsummary")
 # install.packages("flextable")
 # install.packages("officer")
@@ -1591,6 +1410,8 @@ flextable::save_as_docx(tab2_word, path = file_path_docx)
 file_path_docx
 ```
 
+
+#Missingness summary
 # Variables that feed into MetS and key covariates (all are in imp_data)
 ```{r}
 library(dplyr)
@@ -1636,7 +1457,6 @@ miss_mets_table
 ```
 
 #Consort Diagram
-
 ```{r}
 library(DiagrammeR)
 
@@ -1686,6 +1506,7 @@ digraph consort {
 ")
 ```
 
+#Prevelance ratios
 ```{r}
 library(survey)
 
@@ -1704,187 +1525,324 @@ model_pr <- update(logit_adj, family = quasipoisson())
 exp(coef(model_pr))
 exp(confint(model_pr))
 ```
-#Missingness summary
+
+#Daggity figure code
 ```{r}
+# Install if needed
+install.packages(c("dagitty", "ggdag"))
+
+library(dagitty)
+library(ggdag)
+
+mets_cancer_dag <- dagitty('dag {
+  MetS [exposure, pos="0.2,0.5"]
+  Cancer [outcome, pos="0.8,0.5"]
+  Age [pos="0.5,0.15"]
+  Sex [pos="0.3,0.15"]
+  Race [pos="0.7,0.15"]
+  SES [pos="0.5,0.85"]
+  
+  MetS -> Cancer
+  Age -> MetS
+  Age -> Cancer
+  Sex -> MetS
+  Sex -> Cancer
+  Race -> MetS
+  Race -> Cancer
+  SES -> MetS
+  SES -> Cancer
+}')
+
+ggdag(mets_cancer_dag, text = TRUE, use_labels = "name") +
+  theme_dag_blank() +
+  labs(title = "Directed Acyclic Graph: MetS and Cancer")
+
+ggsave("dag_mets_cancer.png", width = 8, height = 6, dpi = 300)
+
+```
+```{r}
+# Create binary age modifier (20-49 vs ≥50) per your proposal
+nhanes_imp1 <- nhanes_imp1 %>%
+  mutate(age_mod = factor(if_else(age < 50, "20-49", "50+"), levels = c("20-49", "50+")))
+
+# Rebuild survey design
+nhanes_design_imp <- svydesign(
+  ids = ~SDMVPSU, strata = ~SDMVSTRA,
+  weights = ~WTMEC2YR, nest = TRUE, data = nhanes_imp1
+)
+
+# Test MetS × Sex interaction
+model_sex_int <- svyglm(
+  cancer_any ~ mets4_imp * sex + age_cat + race4,
+  design = nhanes_design_imp, family = quasibinomial()
+)
+summary(model_sex_int)
+
+# Test MetS × Age interaction
+model_age_int <- svyglm(
+  cancer_any ~ mets4_imp * age_mod + sex + race4,
+  design = nhanes_design_imp, family = quasibinomial()
+)
+summary(model_age_int)
+
+# Extract p-values for interactions
+cat("MetS × Sex p-value:", summary(model_sex_int)$coefficients["mets4_imp:sexFemale", "Pr(>|t|)"], "\n")
+cat("MetS × Age p-value:", summary(model_age_int)$coefficients["mets4_imp:age_mod50+", "Pr(>|t|)"], "\n")
+
+```
+```{r}
+# Stratified models
+design_male <- subset(nhanes_design_imp, sex == "Male")
+design_female <- subset(nhanes_design_imp, sex == "Female")
+
+# Crude ORs
+or_crude <- broom::tidy(svyglm(cancer_any ~ mets4_imp, design = nhanes_design_imp, family = quasibinomial()), conf.int = TRUE, exponentiate = TRUE) %>% filter(term == "mets4_imp")
+or_crude_m <- broom::tidy(svyglm(cancer_any ~ mets4_imp, design = design_male, family = quasibinomial()), conf.int = TRUE, exponentiate = TRUE) %>% filter(term == "mets4_imp")
+or_crude_f <- broom::tidy(svyglm(cancer_any ~ mets4_imp, design = design_female, family = quasibinomial()), conf.int = TRUE, exponentiate = TRUE) %>% filter(term == "mets4_imp")
+
+# Adjusted ORs
+or_adj <- broom::tidy(svyglm(cancer_any ~ mets4_imp + age_cat + sex + race4, design = nhanes_design_imp, family = quasibinomial()), conf.int = TRUE, exponentiate = TRUE) %>% filter(term == "mets4_imp")
+or_adj_m <- broom::tidy(svyglm(cancer_any ~ mets4_imp + age_cat + race4, design = design_male, family = quasibinomial()), conf.int = TRUE, exponentiate = TRUE) %>% filter(term == "mets4_imp")
+or_adj_f <- broom::tidy(svyglm(cancer_any ~ mets4_imp + age_cat + race4, design = design_female, family = quasibinomial()), conf.int = TRUE, exponentiate = TRUE) %>% filter(term == "mets4_imp")
+
+# Format function
+fmt <- function(x) sprintf("%.2f (%.2f–%.2f)", x$estimate, x$conf.low, x$conf.high)
+
+# Print results
+cat("OVERALL - Crude:", fmt(or_crude), "| Adjusted:", fmt(or_adj), "\n")
+cat("MALES   - Crude:", fmt(or_crude_m), "| Adjusted:", fmt(or_adj_m), "\n")
+cat("FEMALES - Crude:", fmt(or_crude_f), "| Adjusted:", fmt(or_adj_f), "\n")
+
+```
+
+```{r}
+# =============================================================================
+# STRATIFIED RESULTS TABLE AND EFFECT MODIFICATION - CLEAN OUTPUT
+# =============================================================================
+
 library(dplyr)
-library(tidyr)
-library(gt)
-library(scales)
+library(knitr)
+library(kableExtra)
+library(flextable)
 
-# 0. Build a data set that really has everything we want
-#    MetS pieces and BMI etc from imp_data, age_cat/sex/race4 from nhanes_analytic
-missing_df <- nhanes_analytic %>%
-  select(SEQN, age_cat, sex, race4) %>%          # covariates
-  left_join(
-    imp_data %>%
-      select(SEQN, bmi, waist_high, ht_bp, diab_dx, chol_high, cancer_any),
-    by = "SEQN"
-  )
+# =============================================================================
+# 1. CREATE THE RESULTS TABLE (RUBRIC FORMAT)
+# =============================================================================
 
-# 1. Variables you want in the table (pre imputation)
-vars_for_table <- c(
-  "bmi",         # BMI continuous
-  "waist_high",  # MetS component
-  "ht_bp",       # MetS component
-  "diab_dx",     # MetS component
-  "chol_high",   # MetS component
-  "cancer_any",  # outcome
-  "age_cat",
-  "sex",
-  "race4"
+# Your results from Task 3
+results_table <- data.frame(
+  Stratum = c("Overall", "Males", "Females"),
+  Crude_OR = c("2.57 (2.17–3.04)", "2.76 (2.24–3.41)", "2.42 (1.95–3.00)"),
+  Adjusted_OR = c("1.18 (1.00–1.39)", "1.36 (0.99–1.86)", "1.07 (0.90–1.29)")
 )
 
-# 2. Sanity check: all of these must exist in missing_df
-missing_vars <- setdiff(vars_for_table, names(missing_df))
-if (length(missing_vars) > 0) {
-  stop(
-    "These variables are not in missing_df when this chunk runs: ",
-    paste(missing_vars, collapse = ", ")
+# Clean kable table for console/R Markdown
+kable(
+  results_table,
+  col.names = c("", "Unadjusted OR (95% CI)", "Adjusted OR (95% CI)ᵃ"),
+  caption = "Table 2. Association Between Metabolic Syndrome and Any Cancer by Sex (NHANES 2021–2023)",
+  align = c("l", "c", "c")
+) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  add_footnote(
+    label = "ᵃAdjusted for age group, sex (overall model only), and race/ethnicity.",
+    notation = "none"
   )
-}
 
-n_total <- nrow(missing_df)
+# =============================================================================
+# 2. RUBRIC-STYLE TABLE (exactly matching the format they showed)
+# =============================================================================
 
-# 3. Nice labels for the table
-var_labels <- c(
-  bmi        = "Body mass index (kg/m^2)",
-  waist_high = "High waist circumference (MetS component)",
-  ht_bp      = "Hypertension (MetS component)",
-  diab_dx    = "Diabetes diagnosis (MetS component)",
-  chol_high  = "High cholesterol (MetS component)",
-  cancer_any = "Any self reported cancer history",
-  age_cat    = "Age group (20–39, 40–59, 60–79, 80+)",
-  sex        = "Sex",
-  race4      = "Race and ethnicity (4 categories)"
+rubric_table <- data.frame(
+  Exposure = c("MetS (≥3 of 4 components)", "  No", "  Yes"),
+  Overall_Unadj = c("", "1.0 (ref.)", "2.57 (2.17–3.04)"),
+  Overall_Adj = c("", "1.0 (ref.)", "1.18 (1.00–1.39)"),
+  Males_Unadj = c("", "1.0 (ref.)", "2.76 (2.24–3.41)"),
+  Males_Adj = c("", "1.0 (ref.)", "1.36 (0.99–1.86)"),
+  Females_Unadj = c("", "1.0 (ref.)", "2.42 (1.95–3.00)"),
+  Females_Adj = c("", "1.0 (ref.)", "1.07 (0.90–1.29)")
 )
 
-# 4. Build the missingness table
-miss_tbl <- missing_df %>%
-  summarise(across(all_of(vars_for_table), ~ sum(is.na(.)))) %>%
-  pivot_longer(
-    cols      = everything(),
-    names_to  = "var",
-    values_to = "n_missing"
+# Print with nice headers
+kable(
+  rubric_table,
+  col.names = c("", 
+                "Unadjusted", "Adjustedᵃ",
+                "Unadjusted", "Adjustedᵇ", 
+                "Unadjusted", "Adjustedᵇ"),
+  caption = "Table 2. Association Between Metabolic Syndrome and Any Cancer (NHANES 2021–2023)",
+  align = c("l", "c", "c", "c", "c", "c", "c")
+) %>%
+  kable_styling(full_width = FALSE) %>%
+  add_header_above(c(" " = 1, "Overall" = 2, "Males" = 2, "Females" = 2)) %>%
+  add_footnote(
+    label = c(
+      "ᵃAdjusted for age group, sex, and race/ethnicity.",
+      "ᵇAdjusted for age group and race/ethnicity."
+    ),
+    notation = "none"
+  )
+
+# =============================================================================
+# 3. EFFECT MODIFICATION TABLE
+# =============================================================================
+
+# Your interaction p-values from the output
+em_table <- data.frame(
+  Interaction = c("MetS × Sex", "MetS × Age group (20–49 vs ≥50)"),
+  P_value = c("0.125", "0.594"),
+  Interpretation = c("No significant effect modification", 
+                     "No significant effect modification")
+)
+
+kable(
+  em_table,
+  col.names = c("Interaction Term", "P-value", "Interpretation"),
+  caption = "Effect Modification Testing",
+  align = c("l", "c", "l")
+) %>%
+  kable_styling(full_width = FALSE)
+
+# =============================================================================
+# 4. EXPORT TO WORD (for PowerPoint)
+# =============================================================================
+
+# Flextable version for Word export
+ft_results <- flextable(rubric_table) %>%
+  set_header_labels(
+    Exposure = "",
+    Overall_Unadj = "Unadjusted",
+    Overall_Adj = "Adjustedᵃ",
+    Males_Unadj = "Unadjusted",
+    Males_Adj = "Adjustedᵇ",
+    Females_Unadj = "Unadjusted",
+    Females_Adj = "Adjustedᵇ"
   ) %>%
-  mutate(
-    Variable        = var_labels[var],
-    n_complete      = n_total - n_missing,
-    percent_missing = 100 * n_missing / n_total
+  add_header_row(
+    values = c("", "Overall", "Males", "Females"),
+    colwidths = c(1, 2, 2, 2)
   ) %>%
-  select(Variable, n_complete, n_missing, percent_missing) %>%
-  # Order: BMI, MetS components, outcome, covariates
-  arrange(factor(
-    Variable,
-    levels = c(
-      "Body mass index (kg/m^2)",
-      "High waist circumference (MetS component)",
-      "Hypertension (MetS component)",
-      "Diabetes diagnosis (MetS component)",
-      "High cholesterol (MetS component)",
-      "Any self reported cancer history",
-      "Age group (20–39, 40–59, 60–79, 80+)",
-      "Sex",
-      "Race and ethnicity (4 categories)"
+  align(align = "center", part = "all") %>%
+  align(j = 1, align = "left", part = "body") %>%
+  autofit() %>%
+  add_footer_lines(
+    values = c(
+      "ᵃAdjusted for age group, sex, and race/ethnicity.",
+      "ᵇAdjusted for age group and race/ethnicity.",
+      "MetS × Sex interaction p = 0.125; MetS × Age group interaction p = 0.594"
     )
-  ))
-
-# 5. Format like your slide example
-miss_gt <- miss_tbl %>%
-  mutate(
-    n_complete      = comma(n_complete),
-    n_missing       = comma(n_missing),
-    percent_missing = sprintf("%.1f%%", percent_missing)
-  ) %>%
-  gt() %>%
-  tab_header(title = "Missing Data Summary") %>%
-  cols_label(
-    Variable        = "Variable",
-    n_complete      = "n complete",
-    n_missing       = "n missing",
-    percent_missing = "Percent missing"
-  ) %>%
-  tab_options(
-    table.font.size           = 11,
-    column_labels.font.weight = "bold",
-    table.width               = px(700)
   )
 
-miss_gt
-# gtsave(miss_gt, "missing_data_summary.png")
+print(ft_results)
+
+# Save to Word
+save_as_docx(ft_results, path = "Table2_MetS_Cancer_Results.docx")
+
+# =============================================================================
+# 5. SIMPLE CONSOLE OUTPUT
+# =============================================================================
+
+cat("\n")
+cat("================================================================================\n")
+cat("TABLE 2: Association Between Metabolic Syndrome and Any Cancer (NHANES 2021–2023)\n")
+cat("================================================================================\n\n")
+
+cat("                          Overall              Males               Females\n")
+cat("                     Unadj.    Adj.ᵃ      Unadj.    Adj.ᵇ      Unadj.    Adj.ᵇ\n")
+cat("--------------------------------------------------------------------------------\n")
+cat("MetS (≥3 components)\n")
+cat("  No                1.0(ref)  1.0(ref)   1.0(ref)  1.0(ref)   1.0(ref)  1.0(ref)\n")
+cat("  Yes               2.57      1.18       2.76      1.36       2.42      1.07\n")
+cat("                   (2.17-    (1.00-     (2.24-    (0.99-     (1.95-    (0.90-\n")
+cat("                    3.04)     1.39)      3.41)     1.86)      3.00)     1.29)\n")
+cat("--------------------------------------------------------------------------------\n")
+cat("ᵃAdjusted for age, sex, race/ethnicity\n")
+cat("ᵇAdjusted for age, race/ethnicity\n\n")
+
+cat("Effect Modification Testing:\n")
+cat("  MetS × Sex interaction:       p = 0.125 (not significant)\n")
+cat("  MetS × Age group interaction: p = 0.594 (not significant)\n")
+cat("================================================================================\n")
+
 ```
+#In unadjusted analyses, metabolic syndrome was associated with 2.6-fold higher odds of any cancer (OR 2.57, 95% CI 2.17–3.04). After adjustment for age, sex, and race/ethnicity, this association attenuated substantially (adjusted OR 1.18, 95% CI 1.00–1.39, p = 0.052), suggesting that confounding by age explained much of the crude association.
+
+#In sex-stratified analyses, the adjusted association appeared stronger in males (OR 1.36, 95% CI 0.99–1.86) than in females (OR 1.07, 95% CI 0.90–1.29), although formal testing did not detect significant effect modification by sex (interaction p = 0.125) or age group (interaction p = 0.594)."
 
 ```{r}
-library(survey)
-library(broom)
-library(dplyr)
+library(car)
 
-## crude model - only MetS
-logit_crude <- svyglm(
-  cancer_any ~ mets4_imp,
-  design = nhanes_design_imp,
-  family = quasibinomial()
-)
+# Create a model frame with dummy variables
+# This converts categorical to numeric 0/1
 
-## adjusted model - MetS + covariates
-logit_adj <- svyglm(
+model_for_vif <- glm(
   cancer_any ~ mets4_imp + age_cat + sex + race4,
-  design = nhanes_design_imp,
-  family = quasibinomial()
+  data = nhanes_imp1,
+  family = binomial()
 )
+
+# Extract the model matrix (shows dummy variables)
+X <- model.matrix(model_for_vif)
+head(X)  # See the dummy variables created
+
+# Calculate VIF on dummy variables
+vif_results <- car::vif(model_for_vif)
+print(vif_results)
+
 ```
 
 ```{r}
-# tidy crude
-crude_tab <- tidy(
-  logit_crude,
-  conf.int = TRUE,
-  exponentiate = TRUE
-) %>%
-  filter(term == "mets4_imp") %>%
-  transmute(
-    Variable = "Metabolic syndrome (≥3 of 4 components)",
-    crude_or = estimate,
-    crude_lci = conf.low,
-    crude_uci = conf.high,
-    crude_p   = p.value
-  )
+library(car)
 
-# tidy adjusted
-adj_tab <- tidy(
-  logit_adj,
-  conf.int = TRUE,
-  exponentiate = TRUE
-) %>%
-  filter(term == "mets4_imp") %>%
-  transmute(
-    Variable = "Metabolic syndrome (≥3 of 4 components)",
-    adj_or = estimate,
-    adj_lci = conf.low,
-    adj_uci = conf.high,
-    adj_p   = p.value
-  )
-
-# join crude and adjusted
-table_crude_adj <- left_join(crude_tab, adj_tab, by = "Variable") %>%
-  mutate(
-    `Crude OR (95% CI)` = sprintf("%.2f (%.2f - %.2f)", crude_or, crude_lci, crude_uci),
-    `p (crude)`         = sprintf("%.3f", crude_p),
-    `Adjusted OR (95% CI)` = sprintf("%.2f (%.2f - %.2f)", adj_or, adj_lci, adj_uci),
-    `p (adjusted)`         = sprintf("%.3f", adj_p)
-  ) %>%
-  select(
-    Variable,
-    `Crude OR (95% CI)`,
-    `p (crude)`,
-    `Adjusted OR (95% CI)`,
-    `p (adjusted)`
-  )
-
-table_crude_adj
-knitr::kable(
-  table_crude_adj,
-  caption = "Crude and adjusted associations between metabolic syndrome and any cancer (NHANES 2021-2023).",
-  align = c("l", "c", "c", "c", "c")
+# Fit model with all predictors
+model_categorical <- glm(
+  cancer_any ~ mets4_imp + age_cat + sex + race4,
+  data = nhanes_imp1,
+  family = binomial()
 )
+
+# Get VIF values (returns a matrix for categorical variables)
+vif_results <- car::vif(model_categorical)
+
+# Convert to dataframe - CORRECT WAY
+vif_table <- as.data.frame(vif_results)
+vif_table$Variable <- rownames(vif_table)
+rownames(vif_table) <- NULL
+
+# Clean up column names
+colnames(vif_table) <- c("GVIF", "Df", "GVIF_Adjusted", "Variable")
+
+# Reorder columns
+vif_table <- vif_table[, c("Variable", "GVIF", "Df", "GVIF_Adjusted")]
+
+# Print
+print(vif_table)
+
+# Interpretation
+cat("\n=== MULTICOLLINEARITY ASSESSMENT ===\n")
+cat("All GVIF^(1/(2*Df)) values < 1.1 indicate no multicollinearity.\n")
+cat("(Threshold: < 2.5 is acceptable)\n")
+
+```
+```{r}
+# =============================================================================
+# PUSH MY R PROJECT TO GITHUB
+# =============================================================================
+
+# Step 1: Install and load usethis package (if not already installed)
+if (!require("usethis")) install.packages("usethis")
+library(usethis)
+
+# Step 2: Set up Git (run once)
+usethis::use_git()
+
+# Step 3: Connect to your GitHub repository
+# Replace with your actual GitHub repo URL
+usethis::use_github(
+  organisation = NULL,
+  private = FALSE,
+  protocol = "https"
+)
+
 ```
 
