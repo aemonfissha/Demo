@@ -1,0 +1,1890 @@
+---
+title: "ADA MetS Cancer final project"
+author: "Aemon"
+date: "2025-11-24"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!require("pacman")) install.packages("pacman")
+
+# Load packages 
+pacman::p_load(
+  tidyverse,
+  haven,
+  survey,
+  srvyr,
+  janitor
+)
+```
+#Loading the Demographic data
+```{r}
+demo <- haven::read_xpt("data_raw/DEMO_L.XPT")
+
+dplyr::glimpse(demo)
+```
+
+#Loading the Body measurment data
+```{r load_bmx}
+bmx <- haven::read_xpt("data_raw/BMX_L.XPT")  # if the file shows as BMX_L.xpt, match that exactly
+dplyr::glimpse(bmx)
+```
+
+```{r merge_demo_bmx}
+nhanes_basic <- demo %>%
+  dplyr::select(
+    SEQN,
+    RIDAGEYR,   # age
+    RIAGENDR,   # sex
+    RIDRETH3,   # race/ethnicity
+    INDFMPIR,   # income-to-poverty ratio
+    SDMVSTRA,
+    SDMVPSU,
+    WTMEC2YR
+  ) %>%
+  dplyr::left_join(
+    bmx %>%
+      dplyr::select(SEQN, BMXWAIST, BMXBMI, BMXWT, BMXHT),
+    by = "SEQN"
+  )
+
+dplyr::glimpse(nhanes_basic)
+```
+```{r clean_basic}
+nhanes_clean <- nhanes_basic %>%
+  mutate(
+    age = RIDAGEYR,
+    sex = factor(RIAGENDR,
+                 levels = c(1, 2),
+                 labels = c("Male", "Female")),
+    race = factor(RIDRETH3),
+    bmi = BMXBMI,
+    waist = BMXWAIST
+  )
+
+dplyr::glimpse(nhanes_clean)
+```
+
+
+```{r save_clean_basic}
+saveRDS(nhanes_clean, "data_clean/nhanes_clean_basic.rds")
+```
+
+```{r}
+mcq <- haven::read_xpt("data_raw/MCQ_L.XPT")
+dplyr::glimpse(mcq)
+```
+
+```{r}
+mcq_cancer <- mcq %>%
+  dplyr::transmute(
+    SEQN,
+    cancer_any = dplyr::case_when(
+      MCQ220 == 1 ~ 1L,   # told you had cancer
+      MCQ220 == 2 ~ 0L,   # told you did NOT have cancer
+      TRUE        ~ NA_integer_
+    )
+  )
+
+dplyr::glimpse(mcq_cancer)
+```
+```{r}
+nhanes_analytic <- nhanes_clean %>%
+  dplyr::left_join(mcq_cancer, by = "SEQN") %>%
+  dplyr::filter(age >= 20)   # keep adults
+
+dplyr::glimpse(nhanes_analytic)
+```
+#Saving
+```{r}
+saveRDS(nhanes_analytic, "data_clean/nhanes_analytic.rds")
+```
+
+#Next I am define the NHANES survey design object using PSU, strata, and MEC exam weights (WTMEC2YR) so that all estimates are properly survey-weighted.
+```{r}
+nhanes_design <- survey::svydesign(
+  ids    = ~SDMVPSU,
+  strata = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  nest   = TRUE,
+  data   = nhanes_analytic
+)
+
+nhanes_design
+
+```
+#Next I estimate the survey-weighted prevalence of any self-reported cancer diagnosis.
+```{r}
+survey::svymean(~cancer_any, nhanes_design, na.rm = TRUE)
+```
+
+#This means (mean = 0.11594) about 11.6 percent of U.S. adults in this NHANES cycle report ever being told they had cancer.
+
+#Next I estimate the survey-weighted prevalence of any cancer diagnosis by sex.
+```{r}
+cancer_by_sex <- survey::svyby(
+  ~cancer_any,
+  ~sex,
+  nhanes_design,
+  survey::svymean,
+  na.rm = TRUE
+)
+
+cancer_by_sex
+```
+# Males: cancer_any ≈ 0.108 → about 10.7 percent
+
+#Females: cancer_any ≈ 0.124 → about 12.4 percent
+
+#“In 2021–2023 NHANES adults aged ≥20 years, the survey-weighted prevalence of any self-reported cancer diagnosis was 11.6 percent overall; prevalence was 10.7 percent among men and 12.4 percent among women.”
+
+#Next I recode race/ethnicity into four groups (Non-Hispanic White, Non-Hispanic Black, Hispanic, and Other) for descriptive tables and models.
+```{r}
+nhanes_analytic <- nhanes_analytic %>%
+  mutate(
+    race4 = case_when(
+      RIDRETH3 == 3 ~ "Non-Hispanic White",
+      RIDRETH3 == 4 ~ "Non-Hispanic Black",
+      RIDRETH3 %in% c(1, 2) ~ "Hispanic",
+      TRUE ~ "Other"
+    ),
+    race4 = factor(race4)
+  )
+
+# Here I check my new 4-category race variable (race4) by creating a frequency table with counts and percent.
+nhanes_analytic %>% janitor::tabyl(race4)
+```
+#Next I overwrite the saved analytic dataset so it now includes the 4-category race variable
+```{r}
+saveRDS(nhanes_analytic, "data_clean/nhanes_analytic.rds")
+```
+
+#Next I create 4 age groups (20–39, 40–59, 60–79, and ≥80 years) for descriptive tables and plots while keeping continuous age for modeling.
+```{r}
+nhanes_analytic <- nhanes_analytic %>%
+  mutate(
+    age_cat = cut(
+      age,
+      breaks = c(20, 40, 60, 80, Inf),
+      right  = FALSE,
+      labels = c("20–39", "40–59", "60–79", "80+")
+    )
+  )
+
+# Quick check
+nhanes_analytic %>% janitor::tabyl(age_cat)
+```
+#Next I overwrite the saved analytic dataset so it includes the new race (race4) and age group (age_cat) variables.
+```{r}
+saveRDS(nhanes_analytic, "data_clean/nhanes_analytic.rds")
+```
+
+#Next I download and import the blood pressure questionnaire file (BPQ_L.XPT) to help define hypertension for the MetS variable.
+```{r}
+bpq <- haven::read_xpt("data_raw/BPQ_L.XPT")
+
+# Quick look at all BPQ variables to confirm names
+dplyr::glimpse(bpq)
+```
+
+# Next I create a binary hypertension variable using self-reported high BP (BPQ020) and current BP medication use (BPQ150).
+```{r}
+bpq_ht <- bpq %>%
+  dplyr::transmute(
+    SEQN,
+    ht_bp = dplyr::case_when(
+      BPQ020 == 1 ~ 1L,                       # told had high BP
+      BPQ150 == 1 ~ 1L,                       # or taking BP meds
+      BPQ020 == 2 & BPQ150 == 2 ~ 0L,         # said no to both
+      TRUE ~ NA_integer_                      # all other codes (refused, don't know, missing)
+    )
+  )
+
+janitor::tabyl(bpq_ht$ht_bp)
+
+
+```
+
+
+```{r}
+names(nhanes_analytic)
+```
+
+## Next I merge the hypertension indicator from the BPQ file into my main NHANES analytic dataset.
+```{r}
+# Now I combine ht_bp.x and ht_bp.y into a single hypertension variable (ht_bp) and drop the duplicates
+nhanes_analytic <- nhanes_analytic %>%
+  mutate(
+    ht_bp = dplyr::coalesce(ht_bp.x, ht_bp.y)   # prefer the value from bpq_ht when available
+  ) %>%
+  select(-ht_bp.x, -ht_bp.y)                    # remove the old duplicated columns
+
+janitor::tabyl(nhanes_analytic$ht_bp)
+
+```
+
+# Next I recreate the NHANES survey design object so it uses the updated nhanes_analytic
+```{r}
+nhanes_design <- survey::svydesign(
+  ids     = ~SDMVPSU,
+  strata  = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  nest    = TRUE,
+  data    = nhanes_analytic
+)
+
+```
+
+# Next I estimate the survey-weighted prevalence of hypertension (ht_bp) in U.S. adults.
+```{r}
+
+survey::svymean(~ht_bp, nhanes_design, na.rm = TRUE)
+```
+
+#this is weird so I probably coded the medication question as no and tought
+# okay so I have to create a binary hypertension variable (ht_bp) using BPQ020 and BPQ050,
+# correctly treating people who said "no" to high BP but were not asked about meds as 0.
+# Step 1 - Create a clean hypertension variable (ht_bp) in the BPQ data
+```{r}
+bpq_ht <- bpq %>%
+  dplyr::transmute(
+    SEQN,
+    ht_bp = dplyr::case_when(
+      BPQ020 == 1 | BPQ150 == 1 ~ 1L,                               # has hypertension
+      BPQ020 == 2 & (BPQ150 == 2 | is.na(BPQ150)) ~ 0L,             # no hypertension
+      TRUE ~ NA_integer_                                            # refused, do not know, missing
+    )
+  )
+
+# Step 1a - Quick check: do we now see both 0 and 1?
+janitor::tabyl(bpq_ht$ht_bp)
+
+```
+# Then I need to drop any old hypertension variables and merge the new ht_bp
+```{r}
+nhanes_analytic <- nhanes_analytic %>%
+  dplyr::select(-dplyr::any_of(c("ht_bp", "ht_bp.x", "ht_bp.y"))) %>%  # safely remove if present
+  dplyr::left_join(bpq_ht, by = "SEQN")
+
+janitor::tabyl(nhanes_analytic$ht_bp)
+
+```
+# Next i need to redefine the survey design using the updated nhanes_analytic
+```{r}
+nhanes_design <- survey::svydesign(
+  ids     = ~SDMVPSU,
+  strata  = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  nest    = TRUE,
+  data    = nhanes_analytic
+)
+
+# Then I need to estimate survey-weighted prevalence of hypertension
+survey::svymean(~ht_bp, nhanes_design, na.rm = TRUE)
+
+```
+
+#Interpretation: The survey-weighted prevalence of hypertension among U.S. adults in your analytic sample is 31.4 percent.
+
+#Checking the unweighted distribution of the hypertension variable (ht_bp)
+```{r}
+janitor::tabyl(nhanes_analytic$ht_bp)
+
+```
+
+```{r}
+# Estimating survey-weighted hypertension prevalence by sex
+survey::svyby(
+  ~ht_bp,
+  ~sex,
+  nhanes_design,
+  survey::svymean,
+  na.rm = TRUE
+)
+
+# Estimating  survey-weighted hypertension prevalence by age category
+survey::svyby(
+  ~ht_bp,
+  ~age_cat,
+  nhanes_design,
+  survey::svymean,
+  na.rm = TRUE
+)
+
+# Estimating  survey-weighted hypertension prevalence by race/ethnicity
+survey::svyby(
+  ~ht_bp,
+  ~race4,
+  nhanes_design,
+  survey::svymean,
+  na.rm = TRUE
+)
+
+```
+#Interpretation: In 2021–2023 NHANES data, the survey-weighted prevalence of hypertension among U.S. adults was 31.4 percent (SE 0.9 percent). Prevalence was higher among non-Hispanic Black adults (43 percent) compared with non-Hispanic White adults (31 percent), Hispanic adults (26 percent), and adults categorized as Other race (28 percent).
+
+#Estimating survey-weighted prevalence of cancer by hypertension status
+```{r}
+survey::svyby(
+  ~cancer_any,
+  ~ht_bp,
+  nhanes_design,
+  survey::svymean,
+  na.rm = TRUE
+)
+
+```
+#Saving the final analytic dataset including hypertension
+```{r}
+saveRDS(nhanes_analytic, "data_clean/nhanes_analytic_htn.rds")
+```
+#In survey weighted descriptive analyses of NHANES 2021–2023, about 8.4 percent of adults without hypertension (ht_bp = 0) reported having ever been told they had cancer (95 percent confidence interval 7.4 to 9.4 percent). Among adults with hypertension (ht_bp = 1), the estimated prevalence of any self reported cancer was 18.6 percent (95 percent confidence interval 16.7 to 20.5 percent). In other words, before adjusting for potential confounders such as age, sex, and race or ethnicity, adults with hypertension in this dataset had roughly double the prevalence of a self reported cancer diagnosis compared with adults without hypertension.
+
+
+## Next I fit a survey-weighted logistic regression model for any cancer
+# with hypertension as the main exposure, adjusting for age group,
+# sex, and race/ethnicity.
+```{r}
+cancer_htbp_model <- survey::svyglm(
+  cancer_any ~ ht_bp + age_cat + sex + race4,
+  design = nhanes_design,
+  family = quasibinomial()
+)
+
+summary(cancer_htbp_model)
+
+```
+# Next I convert the hypertension coefficient to an odds ratio
+# with a 95 percent confidence interval.
+```{r}
+coef_est <- coef(cancer_htbp_model)
+ci_est   <- confint(cancer_htbp_model)
+
+or_htbp  <- exp(coef_est["ht_bp"])
+ci_htbp  <- exp(ci_est["ht_bp", ])
+
+or_htbp
+ci_htbp
+
+```
+#Interpretation: After accounting for age, sex, and race or ethnicity, hypertension remained independently associated with cancer prevalence. The adjusted odds of any self reported cancer were 1.23 times higher among adults with hypertension than among those without hypertension (95 percent CI 1.07 to 1.42).
+
+
+#Now I convert the regression coefficients to odds ratios with 95% CIs
+```{r}
+nhanes_logit <- survey::svyglm(
+  cancer_any ~ ht_bp + age_cat + sex + race4,
+  design  = nhanes_design,
+  family  = quasibinomial()
+)
+
+```
+```{r}
+or_table <- broom::tidy(
+  nhanes_logit,
+  conf.int = TRUE,
+  exponentiate = TRUE
+)
+
+or_table
+
+```
+#From the table (exponentiated estimates):
+
+#Hypertension (ht_bp): OR ≈ 1.23 with 95% CI 1.07 to 1.42, p ≈ 0.01.
+
+#Interpretation: After accounting for age, sex, and race/ethnicity, adults with hypertension have about 23 percent higher odds of reporting a cancer diagnosis compared with adults without hypertension. The confidence interval does not include 1, so this association is statistically significant.
+
+#Age categories (ref = 20–39): 40–59: OR ≈ 3.69 (95% CI ~2.40 to 5.70), 60–79: OR ≈ 14.66 (95% CI ~9.45 to 22.75), 80+: OR ≈ 24.96 (95% CI ~15.12 to 41.20)
+#Interpretation: Odds of cancer rise steeply with age, especially from 60 years and above, which is exactly what we expect.
+#Sex (ref = Male):
+#Female: OR ≈ 1.11 (95% CI ~0.90 to 1.38), p ~0.27
+#Interpretation: No clear evidence of a sex difference in cancer odds after controlling for hypertension, age, and race.
+#Race (ref = Hispanic):
+#Non Hispanic Black: OR ≈ 1.06 (CI ~0.66 to 1.72), not significant
+#Non Hispanic White: OR ≈ 2.42 (CI ~1.65 to 3.55), significant
+#Other: OR ≈ 1.79 (CI ~1.18 to 2.72), significant
+
+#Interpretation: Compared with Hispanic adults, Non Hispanic White and Other race groups have higher odds of reporting cancer, even after adjusting for hypertension, age, and sex. Non Hispanic Black adults do not differ clearly from Hispanic adults in this model.
+# Next I create a central obesity indicator (waist_high) using sex-specific waist cutpoints.
+```{r}
+nhanes_analytic <- nhanes_analytic %>%
+  dplyr::mutate(
+    waist_high = dplyr::case_when(
+      sex == "Male"   & waist >= 102 ~ 1L,   # men with waist ≥102 cm
+      sex == "Female" & waist >= 88  ~ 1L,   # women with waist ≥88 cm
+      sex %in% c("Male", "Female")          ~ 0L,   # men/women below these cutpoints
+      TRUE                                  ~ NA_integer_  # missing / other
+    )
+  )
+
+janitor::tabyl(nhanes_analytic$waist_high)
+```
+
+# Next I import the diabetes questionnaire file (DIQ_L.XPT)
+# This will help define the diabetes component for MetS.
+```{r}
+getwd()
+list.files("data_raw")
+
+```
+
+```{r}
+diq <- haven::read_xpt("data_raw/DIQ_L.XPT")
+names(diq)
+```
+
+# I am keeping the SEQN and the main diabetes question, then code diabetes diagnosis
+# DIQ010: "Doctor told you have diabetes"
+# 1 = Yes, 2 = No, 3 = Borderline, 7 = Refused, 9 = Do not know
+```{r}
+diq_diab <- diq %>%
+  dplyr::select(SEQN, DIQ010) %>%
+  dplyr::mutate(
+    diab_dx = dplyr::case_when(
+      DIQ010 == 1 ~ 1L,                # has diagnosed diabetes
+      DIQ010 == 2 ~ 0L,                # no diagnosed diabetes
+      DIQ010 %in% c(3, 7, 9) ~ NA_integer_  # borderline, refused, do not know
+    )
+  ) %>%
+  dplyr::select(SEQN, diab_dx)
+```
+
+
+```{r}
+janitor::tabyl(diq_diab$diab_dx)
+
+```
+# Next I am merging the diabetes diagnosis into the analytic dataset
+```{r}
+nhanes_analytic <- nhanes_analytic %>%
+  dplyr::left_join(diq_diab, by = "SEQN")
+
+janitor::tabyl(nhanes_analytic$diab_dx)
+
+```
+
+# Now I update the survey design object after adding the diabetes variable
+```{r}
+nhanes_design <- survey::svydesign(
+  ids     = ~SDMVPSU,
+  strata  = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  nest    = TRUE,
+  data    = nhanes_analytic
+)
+```
+
+# Then I estimate the survey-weighted prevalence of diagnosed diabetes
+```{r}
+survey::svymean(~diab_dx, nhanes_design, na.rm = TRUE)
+```
+#In the survey-weighted NHANES 2021–2023 analytic sample, approximately 12.1% of U.S. adults had self-reported, physician-diagnosed diabetes (SE 0.7 percentage points), corresponding to an estimated 95% confidence interval of about 10.7% to 13.5%.
+
+# Next I estimate the survey-weighted prevalence of any cancer by diabetes diagnosis
+```{r}
+survey::svyby(
+  ~cancer_any,
+  ~diab_dx,
+  nhanes_design,
+  survey::svymean,
+  na.rm = TRUE
+)
+
+```
+#Among adults without diagnosed diabetes (diab_dx = 0), the estimated prevalence of any cancer is about 10.1 percent (SE 0.004). A rough 95 percent confidence interval is 9.3 to 11.0 percent.
+
+#Among adults with diagnosed diabetes (diab_dx = 1), the estimated prevalence of any cancer is about 20.3 percent (SE 0.014). The corresponding 95 percent confidence interval is roughly 17.5 to 23.1 percent.
+
+#Meaning in the NHANES 2021–2023 data set, U.S. adults with a self-reported diabetes diagnosis have about twice the prevalence of a self-reported cancer diagnosis compared with adults without diabetes, before adjusting for age, sex, race/ethnicity, or other factors.
+
+# Now I fit a survey-weighted logistic regression model with any cancer as the outcome
+# and diabetes diagnosis as the main predictor, adjusting for age, sex, and race/ethnicity.
+```{r}
+nhanes_logit_diab <- survey::svyglm(
+  cancer_any ~ diab_dx + age_cat + sex + race4,
+  design  = nhanes_design,
+  family  = quasibinomial()
+)
+
+summary(nhanes_logit_diab)
+
+```
+## I convert regression coefficients to odds ratios with 95% confidence intervals
+```{r}
+or_table_diab <- broom::tidy(
+  nhanes_logit_diab,
+  conf.int   = TRUE,
+  exponentiate = TRUE
+)
+
+or_table_diab
+
+```
+
+#Interpretation
+#Diabetes diagnosis (diab_dx) OR ≈ 1.36, 95% CI ≈ 1.05 to 1.76 (p ≈ 0.027)
+#After accounting for age group, sex, and race or ethnicity, adults with a diagnosed history of diabetes had about 36 percent higher odds of reporting any cancer compared with adults without diabetes (OR 1.36, 95 percent CI 1.05 to 1.76). The confidence interval does not include 1, and the p value is below 0.05, so this association is statistically significant in the survey weighted model.
+
+#Older age groups had progressively higher odds of cancer compared with adults aged 20–39, with particularly large increases for ages 60–79 and 80 plus, while odds were higher among non Hispanic White and “Other” race groups compared with Hispanics; sex and non Hispanic Black race were not statistically significant after adjustment.
+
+#Next I will create a self-reported high cholesterol variable from BPQ 
+```{r}
+bpq_chol <- bpq %>%
+  dplyr::transmute(
+    SEQN,
+    chol_high = dplyr::case_when(
+      # 1 = yes, ever told had high cholesterol
+      BPQ080 == 1 | BPQ101D == 1 ~ 1L,
+      # 2 = no, never told AND not on cholesterol meds
+      BPQ080 == 2 & BPQ101D == 2 ~ 0L,
+      # everything else (refused, don't know, missing) set to NA
+      TRUE ~ NA_integer_
+    )
+  )
+
+# Quick check of how many 0 / 1 / NA
+janitor::tabyl(bpq_chol$chol_high)
+
+```
+#And then merginng high cholesterol varaible into the analytic dataset
+```{r}
+nhanes_analytic <- nhanes_analytic %>%
+  dplyr::left_join(bpq_chol, by = "SEQN")
+
+janitor::tabyl(nhanes_analytic$chol_high)
+
+```
+
+#Now I will combine all the varaibles above to make a new variable called Mets
+```{r}
+nhanes_analytic <- nhanes_analytic %>%
+  dplyr::mutate(
+    mets_count4 = waist_high + ht_bp + diab_dx + chol_high,
+    mets4 = dplyr::case_when(
+      is.na(mets_count4) ~ NA_integer_,
+      mets_count4 >= 3   ~ 1L,
+      TRUE               ~ 0L
+    )
+  )
+
+janitor::tabyl(nhanes_analytic$mets_count4)
+janitor::tabyl(nhanes_analytic$mets4)
+
+```
+
+## Estimate survey weighted prevalence of metabolic syndrome (4 component definition)
+```{r}
+survey::svymean(~mets4, nhanes_design, na.rm = TRUE)
+
+```
+# Re-create survey design object after adding MetS variables
+```{r}
+
+nhanes_design <- survey::svydesign(
+  ids     = ~SDMVPSU,
+  strata  = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  nest    = TRUE,
+  data    = nhanes_analytic
+)
+
+```
+
+# Estimate survey weighted prevalence of metabolic syndrome (4 component definition)
+```{r}
+survey::svymean(~mets4, nhanes_design, na.rm = TRUE)
+
+```
+#Interpretation: In survey-weighted analyses, 18.7 percent of U.S. adults (95 percent CI roughly 17–20 percent) met the definition of metabolic syndrome.
+
+# Next I estimate the survey-weighted prevalence of any cancer by 4-component MetS status
+```{r}
+survey::svyby(
+  ~cancer_any,          # outcome: any cancer
+  ~mets4,               # exposure: 4-component MetS (0 = no MetS, 1 = MetS)
+  nhanes_design,        # survey design object
+  survey::svymean,      # function to compute means (prevalence)
+  na.rm = TRUE
+)
+
+```
+# Interpretation: Among adults without MetS (mets4 = 0), the survey-weighted prevalence of any cancer is 0.0936, or about 9.4 percent (SE ≈ 0.0049).
+#Among adults with MetS (mets4 = 1), the survey-weighted prevalence of any cancer is 0.1980, or about 19.8 percent (SE ≈ 0.0096).
+
+#In survey-weighted analyses, approximately 9 percent of U.S. adults without metabolic syndrome had a history of any cancer, compared with about 20 percent of those with metabolic syndrome, suggesting roughly a two-fold higher cancer prevalence among adults with MetS.
+
+############
+## Next I fit a survey-weighted logistic regression model
+# Outcome: any cancer (cancer_any)
+# Main exposure: metabolic syndrome (mets4: 0 = no MetS, 1 = MetS)
+# Covariates: age_cat, sex, race4
+```{r}
+nhanes_logit_mets <- svyglm(
+  cancer_any ~ mets4 + age_cat + sex + race4,
+  design = nhanes_design,
+  family = quasibinomial()
+)
+
+summary(nhanes_logit_mets)
+
+```
+
+# Converting it to odds ratio
+```{r}
+or_table_mets <- broom::tidy(
+  nhanes_logit_mets,
+  conf.int = TRUE,
+  exponentiate = TRUE
+)
+or_table_mets
+
+```
+## Secondary definition: 2 or more components
+```{r}
+nhanes_analytic <- nhanes_analytic %>%
+  mutate(
+    mets2 = case_when(
+      mets_count4 >= 2 ~ 1L,   # 2, 3, or 4 components
+      mets_count4 <= 1 ~ 0L,   # 0 or 1 component
+      TRUE ~ NA_integer_
+    )
+  )
+
+janitor::tabyl(nhanes_analytic$mets2)
+
+```
+#Next I need to work in the lab variables starting with Fasting Blood Glucose
+```{r}
+library(haven)
+library(dplyr)
+
+glu_raw <- read_xpt("data_raw/GLU_L.xpt")
+
+names(glu_raw)[1:20]
+
+```
+
+#I need to merge the lab values starting with Fasting Blood Glucose
+```{r}
+#Keep SEQN and glucose
+glu <- glu_raw %>%
+  select(SEQN, LBXGLU)
+
+#Merge onto the analytic dataset
+nhanes_analytic <- nhanes_analytic %>%
+  left_join(glu, by = "SEQN")
+
+summary(nhanes_analytic$LBXGLU)
+table(is.na(nhanes_analytic$LBXGLU))
+
+```
+
+```{r}
+library(mice)
+
+```
+
+# Creating a compact dataset to impute
+```{r}
+imp_data <- nhanes_analytic %>%
+  dplyr::select(
+    SEQN,
+    cancer_any,
+    mets4,          #  4-component MetS
+    waist_high,
+    ht_bp,
+    chol_high,
+    diab_dx,
+    LBXGLU,         # lab glucose merged
+    age,
+    sex,
+    race4,
+    bmi,
+    INDFMPIR
+  )
+
+summary(imp_data)
+
+# Pattern of missing data
+md.pattern(imp_data)
+
+```
+#Here I am reconstructing the method and predictor matrix, based on the CURRENT imp_data, so lengths match.
+```{r}
+library(mice)
+
+# 1. Start fresh from imp_data
+meth <- make.method(imp_data)
+pred <- make.predictorMatrix(imp_data)
+
+# 2. Tell mice which variables to impute and how
+
+# Binary variables -> logistic regression imputation
+meth[c("cancer_any",
+       "mets4",
+       "waist_high",
+       "ht_bp",
+       "diab_dx",
+       "chol_high")] <- "logreg"
+
+# Continuous glucose -> predictive mean matching
+meth["LBXGLU"] <- "pmm"
+
+# Fully observed covariates -> do NOT impute, only use as predictors
+meth[c("age", "sex", "race4")] <- ""
+
+# 3. Run multiple imputation (m = 5 datasets)
+imp_mets <- mice(
+  imp_data,
+  m = 20,
+  method = meth,
+  predictorMatrix = pred,
+  maxit = 20,
+  seed = 2025
+)
+
+# 4. Quick look at the imputation object
+imp_mets
+
+```
+
+
+#Next I need to create a single imputed analytic dataset (nhanes_imp1) where all the MetS components and labs are filled in, but I still keep my survey weights, strata, and age_cat variables from the original analytic file.
+```{r}
+# 1. Take one completed dataset from the imputation
+# (I am starting with the first one for now)
+imp1 <- complete(imp_mets, 1)
+
+# 2. Merge the imputed variables back into my full analytic dataset
+#    I first drop the old versions of the variables that were imputed,
+#    then join on SEQN so the imputed versions replace them.
+
+nhanes_imp1 <- nhanes_analytic %>%
+  dplyr::select(
+    -c(
+      cancer_any, mets4, waist_high, ht_bp,
+      chol_high, diab_dx, LBXGLU, bmi, INDFMPIR,
+      age, sex, race4    # these also live in imp1
+    )
+  ) %>%
+  dplyr::left_join(imp1, by = "SEQN")
+
+# Quick check that it worked
+names(nhanes_imp1)
+summary(nhanes_imp1$LBXGLU)
+summary(nhanes_imp1$mets4)
+
+```
+
+# 1. Recreate MetS components and counts using imputed data -----------------
+```{r}
+nhanes_imp1 <- nhanes_imp1 %>%
+  mutate(
+    # 1a. High glucose indicator using imputed LBXGLU and diabetes diagnosis
+    glu_high = if_else(LBXGLU >= 100 | diab_dx == 1, 1L, 0L),
+
+    # 1b. MetS count across the 4 available components
+    #     1) high waist, 2) hypertension, 3) high cholesterol proxy, 4) high glucose/diabetes
+    mets_count4_imp = waist_high + ht_bp + chol_high + glu_high,
+
+    # 1c. Standard definition: MetS if ≥ 3 of 4 components
+    mets4_imp = if_else(mets_count4_imp >= 3, 1L, 0L),
+
+    # 1d. Sensitivity definition: MetS if ≥ 2 of 4 components
+    mets2_imp = if_else(mets_count4_imp >= 2, 1L, 0L)
+  )
+
+# Quick checks
+table(nhanes_imp1$mets_count4_imp, useNA = "ifany")
+prop.table(table(nhanes_imp1$mets4_imp))
+prop.table(table(nhanes_imp1$mets2_imp))
+
+```
+
+#Then I need to rebuild my survey design using the imputed analytic data.
+```{r}
+nhanes_design_imp <- svydesign(
+  ids    = ~SDMVPSU,
+  strata = ~SDMVSTRA,
+  weights = ~WTMEC2YR,
+  nest   = TRUE,
+  data   = nhanes_imp1
+)
+```
+
+#Next I need to rerun my main model with imputed MetS, age category, sex, and race.
+# 3a. Main model: cancer ~ MetS (≥3 components) + age_cat + sex + race4 -----
+```{r}
+nhanes_logit_mets_imp <- svyglm(
+  cancer_any ~ mets4_imp + age_cat + sex + race4,
+  design = nhanes_design_imp,
+  family = quasibinomial()
+)
+
+summary(nhanes_logit_mets_imp)
+
+or_table_mets_imp <- broom::tidy(
+  nhanes_logit_mets_imp,
+  conf.int = TRUE,
+  exponentiate = TRUE
+)
+
+or_table_mets_imp
+```
+#Next I need to rerun my main model with imputed MetS, age category, sex, and race.
+# Main model: cancer ~ MetS (≥3 components) + age_cat + sex + race4 -----
+```{r}
+nhanes_logit_mets_imp <- svyglm(
+  cancer_any ~ mets4_imp + age_cat + sex + race4,
+  design = nhanes_design_imp,
+  family = quasibinomial()
+)
+
+summary(nhanes_logit_mets_imp)
+
+or_table_mets_imp <- broom::tidy(
+  nhanes_logit_mets_imp,
+  conf.int = TRUE,
+  exponentiate = TRUE
+)
+
+or_table_mets_imp
+library(broom)
+```
+
+#In survey-weighted analyses of 7,809 adults aged 20 years and older, the weighted prevalence of any self-reported cancer was 11.6 percent (SE 0.5 percent). Cancer prevalence increased sharply with age and was higher in Non-Hispanic White adults compared with Hispanic adults but did not differ significantly by sex.
+
+#In age-, sex-, and race-adjusted models, hypertension and diabetes were each associated with substantially higher odds of cancer. Adults with a history of hypertension had 23 percent higher odds of any cancer compared with those without hypertension (OR 1.23, 95 percent CI 1.07 to 1.42), and adults with diabetes had 36 percent higher odds (OR 1.36, 95 percent CI 1.05 to 1.76).
+
+#Using a 4-component definition of metabolic syndrome (large waist circumference, hypertension, hypercholesterolemia, and diabetes), metabolic syndrome was not significantly associated with cancer in complete-case analysis (OR 1.12, 95 percent CI 0.95 to 1.33). After imputing missing risk-factor data with multiple imputation, the estimated association strengthened modestly (OR 1.18, 95 percent CI 1.00 to 1.39, p = 0.052), suggesting a possible but imprecise positive relationship between metabolic syndrome and cancer.
+
+
+# Here I am creating weighted descriptive statistics by MetS (imputed)
+```{r}
+library(srvyr)
+
+nhanes_svy_imp <- nhanes_design_imp %>%
+  srvyr::as_survey_design()
+
+# Cancer prevalence by MetS
+desc_cancer_mets <- nhanes_svy_imp %>%
+  group_by(mets4_imp) %>%
+  summarise(
+    prev = survey_mean(cancer_any, vartype = "ci", na.rm = TRUE)
+  ) %>%
+  mutate(
+    mets_status = if_else(mets4_imp == 1, "MetS (≥3 of 4)", "No MetS (0–2)")
+  )
+
+desc_cancer_mets
+
+```
+
+# Here I am creating quick weighted descriptives for age group and sex by MetS
+```{r}
+tab_age <- nhanes_svy_imp %>%
+  group_by(mets4_imp, age_cat) %>%
+  summarise(
+    prop = survey_prop(vartype = "ci", na.rm = TRUE)
+  )
+
+tab_sex <- nhanes_svy_imp %>%
+  group_by(mets4_imp, sex) %>%
+  summarise(
+    prop = survey_prop(vartype = "ci", na.rm = TRUE)
+  )
+
+tab_age
+tab_sex
+```
+
+# Here I am plotting weighted cancer prevalence by age group
+```{r}
+cancer_age <- nhanes_svy_imp %>%
+  group_by(age_cat) %>%
+  summarise(
+    prev = survey_mean(cancer_any, vartype = "ci", na.rm = TRUE)
+  )
+
+ggplot(cancer_age, aes(x = age_cat, y = prev)) +
+  geom_col() +
+  geom_errorbar(aes(ymin = prev_low, ymax = prev_upp), width = 0.2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    x = "Age group (years)",
+    y = "Cancer prevalence",
+    title = "Survey weighted cancer prevalence by age group"
+  ) +
+  theme_minimal(base_size = 12)
+
+```
+
+# Here I am plotting weighted cancer prevalence by MetS (imputed)
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(srvyr)
+
+# Make sure we have the survey design in srvyr format
+nhanes_svy_imp <- nhanes_design_imp %>%
+  srvyr::as_survey_design()
+
+# Get weighted prevalence and CIs
+cancer_mets <- nhanes_svy_imp %>%
+  group_by(mets4_imp) %>%
+  summarise(
+    prev = survey_mean(cancer_any, vartype = "ci", na.rm = TRUE)
+  ) %>%
+  mutate(
+    mets_status = if_else(mets4_imp == 1, "MetS (≥3 of 4 components)", "No MetS (0–2 components)"),
+    prev_pct    = prev * 100,
+    prev_lci_pct = prev_low * 100,
+    prev_uci_pct = prev_upp * 100,
+    label_pct   = sprintf("%.1f%%", prev_pct)
+  )
+
+ggplot(cancer_mets, aes(x = mets_status, y = prev_pct)) +
+  geom_col(width = 0.3) +
+  geom_errorbar(aes(ymin = prev_lci_pct, ymax = prev_uci_pct), width = 0.10) +
+  geom_text(aes(label = label_pct), vjust = -0.5, size = 3) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), expand = expansion(mult = c(0, 0.05))) +
+  labs(
+    title = "Survey weighted cancer prevalence by MetS status",
+    x = "Metabolic syndrome status (4-component definition)",
+    y = "Cancer prevalence (percent)"
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+
+```{r}
+nhanes_logit_mets_imp <- svyglm(
+  cancer_any ~ mets4_imp + age_cat + sex + race4,
+  design = nhanes_design_imp,
+  family = quasibinomial()
+)
+```
+
+# Here I am creating a forest plot of adjusted ORs from the MetS model
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# 1) Prepare a clean table for plotting
+or_plot <- or_table_mets_imp %>%
+  # drop intercept
+  filter(term != "(Intercept)") %>%
+  # nice labels
+  mutate(
+    label = dplyr::recode(term,
+      "mets4_imp"                = "Metabolic syndrome (≥3 of 4)",
+      "age_cat40–59"             = "Age 40–59 vs 20–39",
+      "age_cat60–79"             = "Age 60–79 vs 20–39",
+      "age_cat80+"               = "Age ≥80 vs 20–39",
+      "sexFemale"                = "Female vs male",
+      "race4Non-Hispanic White"  = "Non-Hispanic White vs Hispanic",
+      "race4Non-Hispanic Black"  = "Non-Hispanic Black vs Hispanic",
+      "race4Other"               = "Other race vs Hispanic"
+    ),
+    # reverse order so MetS is at the top
+    label = factor(label, levels = rev(unique(label)))
+  )
+
+# 2) Forest plot
+ggplot(or_plot, aes(x = estimate, y = label)) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.2) +
+  geom_vline(xintercept = 1, linetype = "dashed") +
+  scale_x_log10() +
+  labs(
+    title = "Adjusted odds ratios for any cancer",
+    x = "Odds ratio (log scale)",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 13)
+
+```
+#In survey weighted logistic regression, metabolic syndrome was associated with about 18 percent higher odds of any cancer after adjustment for age, sex, and race, although the confidence interval slightly overlapped 1. Age remained by far the strongest predictor of cancer.
+
+# Here I am converting the imputed MetS model coefficients to odds ratios
+# with 95% confidence intervals
+```{r}
+
+
+library(broom)
+
+or_table_mets_imp <- broom::tidy(
+  nhanes_logit_mets_imp,
+  conf.int     = TRUE,
+  exponentiate = TRUE
+)
+
+or_table_mets_imp
+
+```
+
+#This figure shows adjusted odds ratios for any self reported cancer. Each dot is an odds ratio, and the horizontal line shows the 95 percent confidence interval. Cancer odds rise sharply with age; for example, adults 60 to 79 years have roughly 15 times the odds of cancer compared with adults 20 to 39 years.Non Hispanic White and Other race groups also have higher odds than Hispanic adults. Metabolic syndrome is associated with about 18 percent higher odds of cancer, but the confidence interval just touches 1, so this is suggestive rather than definitively significant.
+
+# Here I am converting the imputed survey design to srvyr format
+```{r}
+library(srvyr)
+
+nhanes_svy_imp <- nhanes_design_imp %>%
+  srvyr::as_survey_design()
+
+```
+
+# Here I am writing a helper function to make a small table for one categorical variable
+```{r}
+library(dplyr)
+library(tidyr)
+library(janitor)
+library(rlang)
+
+make_cat_table <- function(data, var_name) {
+  var_sym <- rlang::sym(var_name)
+  
+  data %>%
+    group_by(mets4_imp, !!var_sym) %>%
+    summarise(
+      n_unw = unweighted(n()),                        # unweighted count
+      prop  = survey_prop(vartype = "ci", na.rm = TRUE)  # weighted proportion
+    ) %>%
+    mutate(
+      mets_status = if_else(mets4_imp == 1L,
+                            "MetS (≥3 of 4)",
+                            "No MetS (0–2)"),
+      variable = var_name,
+      level    = as.character(!!var_sym),
+      prop_pct = round(prop * 100, 1)
+    ) %>%
+    select(variable, level, mets_status, n_unw, prop_pct)
+}
+
+```
+# Here I am listing the variables I want in Table 1
+```{r}
+vars_cat <- c("sex", "age_cat", "race4", "educ4", "smoke3", "bmi_cat")
+
+# Here I am creating a long Table 1 (stacking all variables)
+table1_long <- bind_rows(
+  lapply(vars_cat, function(v) make_cat_table(nhanes_svy_imp, v))
+)
+
+table1_long %>% head()
+
+```
+
+# Here I am reshaping to a wide format with separate columns for MetS vs No MetS
+```{r}
+table1_wide <- table1_long %>%
+  tidyr::pivot_wider(
+    id_cols  = c(variable, level),
+    names_from  = mets_status,
+    values_from = c(n_unw, prop_pct),
+    names_glue  = "{mets_status} ({.value})"
+  ) %>%
+  arrange(factor(variable, levels = vars_cat), level) %>%
+  clean_names()
+
+table1_wide
+
+```
+
+```{r}
+names(table1_wide)
+```
+
+```{r}
+# Here I am creating a manuscript-style Table 1: n (percent) by MetS status
+table1_pretty <- table1_long %>%
+  mutate(
+    group_label = if_else(
+      mets_status == "no_met_s_0_2",
+      "No MetS (0–2 components)",
+      "MetS (≥3 of 4 components)"
+    ),
+    cell = sprintf("%d (%.1f)", n_unw, prop_pct)
+  ) %>%
+  select(variable, level, group_label, cell) %>%
+  tidyr::pivot_wider(
+    names_from  = group_label,
+    values_from = cell
+  ) %>%
+  arrange(factor(variable, levels = vars_cat), level) %>%
+  group_by(variable) %>%
+  mutate(
+    # show the variable name only for the first row of each block
+    variable = if_else(dplyr::row_number() == 1L, variable, "")
+  ) %>%
+  ungroup()
+
+table1_pretty
+
+```
+
+```{r}
+knitr::kable(
+  table1_pretty,
+  caption = "Table 1. Participant characteristics by metabolic syndrome status (NHANES 2021–2023)"
+)
+
+```
+
+# Here I am adding formal tests for Table 1
+```{r}
+## 1a. Rao–Scott chi-square tests for categorical variables
+#    These test whether the distribution differs by MetS status.
+
+# Sex vs MetS
+survey::svychisq(~sex + mets4_imp, nhanes_design_imp, na.rm = TRUE)
+
+# Age group vs MetS
+survey::svychisq(~age_cat + mets4_imp, nhanes_design_imp, na.rm = TRUE)
+
+# Race or ethnicity vs MetS
+survey::svychisq(~race4 + mets4_imp, nhanes_design_imp, na.rm = TRUE)
+
+# Hypertension vs MetS
+survey::svychisq(~ht_bp + mets4_imp, nhanes_design_imp, na.rm = TRUE)
+
+# Diabetes vs MetS
+survey::svychisq(~diab_dx + mets4_imp, nhanes_design_imp, na.rm = TRUE)
+
+# High cholesterol vs MetS
+survey::svychisq(~chol_high + mets4_imp, nhanes_design_imp, na.rm = TRUE)
+
+# Central obesity vs MetS
+survey::svychisq(~waist_high + mets4_imp, nhanes_design_imp, na.rm = TRUE)
+
+
+## 1b. Design adjusted Wald tests for continuous variables
+#    These compare survey weighted means of continuous variables by MetS.
+
+# Age (continuous) by MetS
+survey::svyttest(age ~ mets4_imp, nhanes_design_imp, na.rm = TRUE)
+
+# BMI (continuous) by MetS
+survey::svyttest(bmi ~ mets4_imp, nhanes_design_imp, na.rm = TRUE)
+
+```
+#Interpretations
+
+## 1. Sex by MetS
+#There was no evidence that sex differed by MetS status. The proportion of men and women was almost identical in the MetS and non-MetS groups (about 48–52 percent in each). The sex distribution was similar in adults with and without metabolic syndrome (Rao–Scott p = 0.97).
+---
+## 2. Age group by MetS
+
+#MetS was much more common at older ages. Adults with MetS were shifted into the 60–79 and 80+ groups, while adults without MetS were mostly in the 20–59 range. Age distribution differed strongly by metabolic syndrome status, with MetS concentrated in older adults (Rao–Scott F ≈ 189, p < 0.0001). Fewer than 10 percent of adults with MetS were aged 20–39 years, compared with about 47 percent of those without MetS.
+---
+## 3. Race or ethnicity by MetS
+
+#Race and ethnicity were associated with MetS. Non-Hispanic White adults made up a larger share of the MetS group, and “Other” race a smaller share, compared with the no-MetS group. Race and ethnicity differed by MetS status (Rao–Scott p = 0.0002), with Non-Hispanic White adults comprising a larger proportion of those with MetS and adults in the “Other” race category less represented in the MetS group.
+---
+## 4. MetS components vs MetS (ht_bp, diab_dx, chol_high, waist_high)
+
+# Each of these is one of the components used to define MetS, so strong associations are expected. As expected, hypertension, diabetes, high cholesterol, and central obesity were far more prevalent among adults classified as having MetS than among those without MetS, with all Rao–Scott p values < 0.001.
+---
+## 5. Mean age and BMI by MetS (design-adjusted Wald tests)
+
+### Age: Adults with MetS were on average about 17 years older than those without MetS, and this difference is highly statistically significant. On average, adults with MetS were 16.6 years older than those without MetS (95 percent CI 15.1 to 18.2 years, p < 0.001).
+
+#BMI: MetS was strongly associated with higher BMI. Adults with MetS had BMI about 5 units higher on average.
+
+
+#Mean BMI was 5.0 kg/m² higher among adults with MetS compared with those without MetS (95 percent CI 4.3 to 5.7 kg/m², p < 0.001).
+
+#Interpretation:
+#In survey weighted descriptive analyses of 7,809 adults, 32 percent met the 4-component definition of metabolic syndrome. Sex distribution was similar by MetS status (Rao–Scott p = 0.97). In contrast, adults with MetS were substantially older and had higher BMI than those without MetS, with mean age 16.6 years higher and mean BMI 5.0 kg/m² higher in the MetS group (both p < 0.001). Age category and race or ethnicity were strongly associated with MetS (Rao–Scott p < 0.001 for both), with MetS concentrated in the 60–79 and 80+ age groups and more frequent among Non-Hispanic White adults. As expected, each MetS component (hypertension, diabetes, high cholesterol, and central obesity) was far more common among adults classified as having MetS (all p < 0.001).
+
+```{r}
+## 1. Predicted risk for a typical profile
+## (whatever profile you used in `svypredmeans`, e.g. age 60-79, female,
+##  NH White, average income, etc.)
+
+pred_vals
+str(pred_vals)
+
+# Extract the predicted probabilities and standard errors
+pred_risk <- as.numeric(pred_vals)                # 2 predicted risks: No MetS, MetS
+pred_se   <- sqrt(attr(pred_vals, "var"))         # corresponding SEs
+
+## 2. Put in a tidy table with labels and 95% CIs
+pred_table <- tibble::tibble(
+  mets4_imp    = c(0, 1),
+  mets_status  = c("No MetS (0-2 components)",
+                   "MetS (>=3 of 4 components)"),
+  pred_risk    = pred_risk,
+  pred_se      = pred_se,
+  pred_lci     = pred_risk - 1.96 * pred_se,
+  pred_uci     = pred_risk + 1.96 * pred_se,
+  pred_risk_pct = pred_risk * 100,
+  pred_lci_pct  = pred_lci * 100,
+  pred_uci_pct  = pred_uci * 100
+)
+
+pred_table
+
+
+```
+```{r}
+pred_vals
+str(pred_vals)
+
+```
+##Absolute risk difference: MetS minus No MetS
+```{r}
+risk_diff     <- pred_table$pred_risk[pred_table$mets4_imp == 1] -
+                 pred_table$pred_risk[pred_table$mets4_imp == 0]
+risk_diff_pct <- risk_diff * 100
+
+risk_diff
+risk_diff_pct
+
+```
+
+```{r}
+risk_summary <- tibble::tibble(
+  profile      = "Example profile: [fill in your age group, sex, race]",
+  risk_no_mets = pred_table$pred_risk_pct[pred_table$mets4_imp == 0],
+  risk_mets    = pred_table$pred_risk_pct[pred_table$mets4_imp == 1],
+  abs_diff_pct = as.numeric(risk_diff_pct)
+)
+
+risk_summary
+
+```
+
+```{r}
+install.packages("gtsummary")
+
+```
+```{r}
+install.packages(c("rlang", "remotes"))
+install.packages("gtsummary")
+```
+
+```{r}
+library(survey)
+library(gtsummary)
+library(dplyr)
+
+# make sure labeled MetS factor is in the design
+nhanes_design_imp <- update(
+  nhanes_design_imp,
+  mets4_imp_f = factor(
+    mets4_imp,
+    levels = c(0, 1),
+    labels = c("No MetS (0–2 components)",
+               "MetS (≥3 of 4 components)")
+  )
+)
+
+table1_mets <-
+  tbl_svysummary(
+    data   = nhanes_design_imp,
+    by     = mets4_imp_f,
+    include = c(
+      age_cat,
+      sex,
+      race4,
+      bmi_cat,
+      educ4,
+      smoke3,
+      cancer_any
+    ),
+    missing  = "no",
+    label = list(
+      age_cat    ~ "Age group (years)",
+      sex        ~ "Sex",
+      race4      ~ "Race and ethnicity",
+      bmi_cat    ~ "Body mass index category",
+      educ4      ~ "Education level",
+      smoke3     ~ "Smoking status",
+      cancer_any ~ "Any cancer diagnosis"
+    ),
+    statistic = all_categorical() ~ "{n} ({p}%)"
+  ) %>%
+  # just use defaults – this will use the survey chi-square internally
+  add_p() %>% 
+  modify_caption(
+    "**Table 1. Survey weighted characteristics of adults by metabolic syndrome status (4-component definition)**"
+  ) %>%
+  modify_header(
+    label ~ "**Characteristic**",
+    all_stat_cols() ~ "**{level}**"
+  ) %>%
+  modify_spanning_header(
+    all_stat_cols() ~ "**Metabolic syndrome status**"
+  ) %>%
+  bold_labels()
+
+table1_mets
+```
+
+#In survey-weighted analyses, adults with metabolic syndrome were substantially older than those without metabolic syndrome, with more than half of MetS cases aged 60 years or older compared with about one fifth among those without MetS (p < 0.001). The sex distribution was similar across groups (about 50 percent female in both, p > 0.9). MetS was more common among Non-Hispanic White adults and less common among Hispanic and Other race groups (p < 0.001). Obesity clustered strongly with MetS; 62 percent of adults with MetS had obesity versus 30 percent among those without MetS (p < 0.001). Adults with MetS had lower educational attainment and were more likely to be former smokers (both p < 0.001). Cancer prevalence was markedly higher among adults with MetS than those without MetS (19 percent vs 8 percent, p < 0.001).
+
+```{r}
+library(survey)
+library(broom)
+
+# MetS x sex interaction model
+nhanes_logit_int_sex <- svyglm(
+  cancer_any ~ mets4_imp * sex + age_cat + race4,
+  design = nhanes_design_imp,
+  family = quasibinomial()
+)
+
+summary(nhanes_logit_int_sex)
+```
+
+```{r}
+or_int_sex <- broom::tidy(
+  nhanes_logit_int_sex,
+  conf.int = TRUE,
+  exponentiate = TRUE
+)
+or_int_sex
+
+```
+
+```{r}
+# Men
+nhanes_logit_mets_male <- svyglm(
+  cancer_any ~ mets4_imp + age_cat + race4,
+  design = subset(nhanes_design_imp, sex == "Male"),
+  family = quasibinomial()
+)
+
+# Women
+nhanes_logit_mets_female <- svyglm(
+  cancer_any ~ mets4_imp + age_cat + race4,
+  design = subset(nhanes_design_imp, sex == "Female"),
+  family = quasibinomial()
+)
+
+broom::tidy(nhanes_logit_mets_male, conf.int = TRUE, exponentiate = TRUE)
+broom::tidy(nhanes_logit_mets_female, conf.int = TRUE, exponentiate = TRUE)
+
+```
+
+## Table 1: Weighted characteristics of the analytic sample (Observed Data)
+```{r}
+install.packages("flextable")
+install.packages("officer")   # for Word export
+
+library(survey)
+library(dplyr)
+library(gtsummary)
+library(flextable)
+library(officer)
+
+# (Run this ONCE in the console, not in the chunk)
+# install.packages(c("gtsummary", "flextable", "officer"))
+
+# Make sure MetS factor is on the design
+nhanes_design_imp <- update(
+  nhanes_design_imp,
+  mets4_imp_f = factor(
+    mets4_imp,
+    levels = c(0, 1),
+    labels = c("No MetS (0-2 components)",
+               "MetS (>=3 of 4 components)")
+  )
+)
+
+table1_mets <-
+  tbl_svysummary(
+    data    = nhanes_design_imp,
+    by      = mets4_imp_f,   # columns = MetS vs no MetS
+    include = c(
+      age_cat,
+      sex,
+      race4,
+      bmi_cat,
+      educ4,
+      smoke3,
+      cancer_any
+    ),
+    missing  = "no",
+    label = list(
+      age_cat    ~ "Age group (years)",
+      sex        ~ "Sex",
+      race4      ~ "Race and ethnicity",
+      bmi_cat    ~ "Body mass index category",
+      educ4      ~ "Education level",
+      smoke3     ~ "Smoking status",
+      cancer_any ~ "Any cancer diagnosis"
+    ),
+    statistic = all_categorical() ~ "{n} ({p}%)"
+  ) %>%
+  # No p-values in Table 1
+  modify_caption(
+    "**Table 1. Survey weighted characteristics of adults by metabolic syndrome status (4-component definition, imputed data)**"
+  ) %>%
+  modify_header(
+    label ~ "**Characteristic**",
+    all_stat_cols() ~ "**{level}**"
+  ) %>%
+  modify_spanning_header(
+    all_stat_cols() ~ "**Metabolic syndrome status**"
+  ) %>%
+  bold_labels()
+
+# Show in the knitted document
+table1_mets
+
+# Export same table to Word
+table1_mets %>%
+  as_flex_table() %>%
+  flextable::save_as_docx(path = "table1_mets.docx")
+```
+
+```{r}
+# Only run these once in the Console, not every knit
+# install.packages("gtsummary")
+# install.packages("flextable")
+# install.packages("officer")
+
+library(survey)
+library(dplyr)
+library(gtsummary)
+library(flextable)
+library(officer)
+
+# Make sure MetS factor is on the design
+nhanes_design_imp <- update(
+  nhanes_design_imp,
+  mets4_imp_f = factor(
+    mets4_imp,
+    levels = c(0, 1),
+    labels = c("No MetS (0-2 components)",
+               "MetS (>=3 of 4 components)")
+  )
+)
+
+table1_mets <-
+  tbl_svysummary(
+    data    = nhanes_design_imp,
+    by      = mets4_imp_f,   # columns = MetS vs no MetS
+    include = c(
+      age_cat,
+      sex,
+      race4,
+      bmi_cat,
+      educ4,
+      smoke3,
+      cancer_any
+    ),
+    missing  = "no",
+    label = list(
+      age_cat    ~ "Age group (years)",
+      sex        ~ "Sex",
+      race4      ~ "Race and ethnicity",
+      bmi_cat    ~ "Body mass index category",
+      educ4      ~ "Education level",
+      smoke3     ~ "Smoking status",
+      cancer_any ~ "Any cancer diagnosis"
+    ),
+    statistic = all_categorical() ~ "{n} ({p}%)"
+  ) |>
+  modify_caption(
+    "**Table 1. Survey weighted characteristics of adults by metabolic syndrome status (4-component definition, imputed data)**"
+  ) |>
+  modify_header(
+    label ~ "**Characteristic**",
+    all_stat_cols() ~ "**{level}**"
+  ) |>
+  modify_spanning_header(
+    all_stat_cols() ~ "**Metabolic syndrome status**"
+  ) |>
+  bold_labels()
+
+# Show in the knitted document
+table1_mets
+```
+
+## TABLE 2: Associations between MetS, covariates, and any cancer (NHANES)
+```{r}
+res_adj <- broom::tidy(
+  logit_adj,
+  conf.int     = TRUE,
+  exponentiate = TRUE
+) %>%
+  filter(term != "(Intercept)")
+
+table2_df <- res_adj %>%
+  mutate(
+    Variable = recode(term, !!!label_map, .default = term),
+    `Adjusted odds ratio (95% CI)` =
+      sprintf("%.2f (%.2f–%.2f)", estimate, conf.low, conf.high),
+    p_col = sprintf("%.3f", p.value),   # format p-values
+    Group = case_when(
+      term == "mets4_imp" ~ "Primary exposure",
+      grepl("^age_cat|^sex|^race4", term) ~ "Sociodemographic factors",
+      TRUE ~ "Other"
+    )
+  )
+
+desired_order <- c("Primary exposure", "Sociodemographic factors", "Other")
+
+final_table2 <- table2_df %>%
+  filter(Group %in% desired_order) %>%
+  arrange(factor(Group, levels = desired_order)) %>%
+  select(
+    Variable,
+    `Adjusted odds ratio (95% CI)`,
+    `p-value` = p_col,
+    Group
+  )
+
+group_indices2 <- rle(as.character(final_table2$Group))$lengths
+names(group_indices2) <- rle(as.character(final_table2$Group))$values
+
+final_table2 %>%
+  select(-Group) %>%
+  kable(
+    caption =   "Table 2. Adjusted associations between metabolic syndrome and any cancer (NHANES 2021–2023, imputed MetS model).",
+    align   = c("l", "c", "c")
+  ) %>%
+  kable_styling(full_width = FALSE) %>%
+  pack_rows(index = group_indices2) %>%
+  add_footnote(
+    label = paste0(
+      "Values are odds ratios (OR) from survey weighted logistic regression using MEC examination weights (WTMEC2YR). ",
+      "All estimates are adjusted for age group, sex, and race or ethnicity. ",
+      "For comparison, the unadjusted (crude) OR for metabolic syndrome (≥3 of 4 components vs 0–2) was ",
+      crude_text, "."
+    ),
+    notation = "none"
+  )
+# Make a flextable version for Word export
+tab2_word <- final_table2 %>%
+  select(Group,
+         Variable,
+         `Adjusted odds ratio (95% CI)`,
+         `p-value`) %>%
+  flextable::flextable() %>%
+  flextable::merge_v(j = "Group") %>%      # visually group rows in Word
+  flextable::align(j = 2:4, align = "center", part = "all") %>%
+  flextable::autofit() %>%
+  flextable::add_footer_lines(
+    values = paste0(
+      "Note. Values are odds ratios (OR) from survey weighted logistic regression using MEC examination weights (WTMEC2YR). ",
+      "All estimates are adjusted for age group, sex, and race or ethnicity. ",
+      "For comparison, the unadjusted (crude) OR for metabolic syndrome (≥3 of 4 components vs 0–2) was ",
+      crude_text, "."
+    )
+  )
+
+# Choose where to save (subfolder 'outputs' inside your project)
+output_folder <- file.path(getwd(), "outputs")
+dir.create(output_folder, showWarnings = FALSE)
+
+file_path_docx <- file.path(output_folder, "table2_mets_any_cancer.docx")
+
+flextable::save_as_docx(tab2_word, path = file_path_docx)
+
+file_path_docx
+```
+
+# Variables that feed into MetS and key covariates (all are in imp_data)
+```{r}
+library(dplyr)
+library(tidyr)
+
+mets_vars <- c(
+  "waist_high",   # central obesity
+  "ht_bp",        # hypertension
+  "diab_dx",      # diabetes
+  "chol_high",    # high cholesterol
+  "LBXGLU",       # fasting glucose lab
+  "bmi",          # BMI
+  "INDFMPIR",     # income-to-poverty ratio
+  "cancer_any"    # outcome (for context)
+)
+
+# 1. Missingness summary on original (pre-imputation) data
+miss_mets <- imp_data %>%
+  dplyr::select(all_of(mets_vars)) %>%          # only the variables of interest
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(
+    cols      = everything(),
+    names_to  = "Variable",
+    values_to = "n_missing"
+  ) %>%
+  mutate(
+    n_total         = nrow(imp_data),
+    n_complete      = n_total - n_missing,
+    percent_missing = round(100 * n_missing / n_total, 1)
+  ) %>%
+  arrange(desc(percent_missing))
+
+# 2. Slide-friendly version (like the example screenshot)
+miss_mets_table <- miss_mets %>%
+  transmute(
+    Variable,
+    `n complete`      = n_complete,
+    `n missing`       = n_missing,
+    `Percent missing` = paste0(percent_missing, "%")
+  )
+
+miss_mets_table
+```
+
+#Consort Diagram
+
+```{r}
+library(DiagrammeR)
+
+grViz("
+digraph consort {
+  graph [
+    layout   = dot,
+    rankdir  = TB,
+    nodesep  = 0.6,
+    ranksep  = 0.6
+  ]
+
+  # Main boxes
+  node [shape = rectangle, fontsize = 11, fontname = 'Helvetica']
+
+  A  [label = 'NHANES 2021–2023 examined sample\\nMEC exam weight available\\n n = 11,933']
+  B  [label = 'Adults aged ≥ 20 years\\nwith MEC exam weight\\n n = 7,809']
+  C  [label = 'Analytic sample with\\nnon-missing cancer outcome\\n n = 7,800']
+
+  # Tiny junction nodes on the stem
+  node [shape = point, width = 0.02, fontsize = 1]
+
+  A_mid [label = '']
+  B_mid [label = '']
+
+  # Exclusion boxes
+  node [shape = rectangle, fontsize = 10, fontname = 'Helvetica']
+
+  A_excl [label = 'Excluded\\nAge < 20 years or missing MEC exam weight\\n n = 4,124']
+  B_excl [label = 'Excluded\\nMissing cancer outcome\\n n = 9']
+
+  # Main vertical flow
+  A     -> A_mid [arrowhead = none]   # no arrowhead in the middle
+  A_mid -> B                          # arrowhead at box B
+
+  B     -> B_mid [arrowhead = none]   # no arrowhead in the middle
+  B_mid -> C                          # arrowhead at box C
+
+  # Keep mid nodes and exclusions on same rank so side arrows are horizontal
+  { rank = same; A_mid; A_excl }
+  { rank = same; B_mid; B_excl }
+
+  # Side branches from the stem (arrowheads at exclusion boxes)
+  A_mid -> A_excl [constraint = false, minlen = 3]
+  B_mid -> B_excl [constraint = false, minlen = 3]
+}
+")
+```
+
+```{r}
+library(survey)
+
+## Assume this is your final logistic model that *already runs*
+## logit_adj <- svyglm(
+##   cancer ~ mets4_imp + age_cat + sex + race4 + educ_cat +
+##     income_cat + ins_cat + smoke_cat + bmi_cat,
+##   design = design_full,
+##   family = quasibinomial()
+## )
+
+## Now build a prevalence-ratio model using the SAME formula and design
+model_pr <- update(logit_adj, family = quasipoisson())
+
+## Exponentiated coefficients are prevalence ratios
+exp(coef(model_pr))
+exp(confint(model_pr))
+```
+#Missingness summary
+```{r}
+library(dplyr)
+library(tidyr)
+library(gt)
+library(scales)
+
+# 0. Build a data set that really has everything we want
+#    MetS pieces and BMI etc from imp_data, age_cat/sex/race4 from nhanes_analytic
+missing_df <- nhanes_analytic %>%
+  select(SEQN, age_cat, sex, race4) %>%          # covariates
+  left_join(
+    imp_data %>%
+      select(SEQN, bmi, waist_high, ht_bp, diab_dx, chol_high, cancer_any),
+    by = "SEQN"
+  )
+
+# 1. Variables you want in the table (pre imputation)
+vars_for_table <- c(
+  "bmi",         # BMI continuous
+  "waist_high",  # MetS component
+  "ht_bp",       # MetS component
+  "diab_dx",     # MetS component
+  "chol_high",   # MetS component
+  "cancer_any",  # outcome
+  "age_cat",
+  "sex",
+  "race4"
+)
+
+# 2. Sanity check: all of these must exist in missing_df
+missing_vars <- setdiff(vars_for_table, names(missing_df))
+if (length(missing_vars) > 0) {
+  stop(
+    "These variables are not in missing_df when this chunk runs: ",
+    paste(missing_vars, collapse = ", ")
+  )
+}
+
+n_total <- nrow(missing_df)
+
+# 3. Nice labels for the table
+var_labels <- c(
+  bmi        = "Body mass index (kg/m^2)",
+  waist_high = "High waist circumference (MetS component)",
+  ht_bp      = "Hypertension (MetS component)",
+  diab_dx    = "Diabetes diagnosis (MetS component)",
+  chol_high  = "High cholesterol (MetS component)",
+  cancer_any = "Any self reported cancer history",
+  age_cat    = "Age group (20–39, 40–59, 60–79, 80+)",
+  sex        = "Sex",
+  race4      = "Race and ethnicity (4 categories)"
+)
+
+# 4. Build the missingness table
+miss_tbl <- missing_df %>%
+  summarise(across(all_of(vars_for_table), ~ sum(is.na(.)))) %>%
+  pivot_longer(
+    cols      = everything(),
+    names_to  = "var",
+    values_to = "n_missing"
+  ) %>%
+  mutate(
+    Variable        = var_labels[var],
+    n_complete      = n_total - n_missing,
+    percent_missing = 100 * n_missing / n_total
+  ) %>%
+  select(Variable, n_complete, n_missing, percent_missing) %>%
+  # Order: BMI, MetS components, outcome, covariates
+  arrange(factor(
+    Variable,
+    levels = c(
+      "Body mass index (kg/m^2)",
+      "High waist circumference (MetS component)",
+      "Hypertension (MetS component)",
+      "Diabetes diagnosis (MetS component)",
+      "High cholesterol (MetS component)",
+      "Any self reported cancer history",
+      "Age group (20–39, 40–59, 60–79, 80+)",
+      "Sex",
+      "Race and ethnicity (4 categories)"
+    )
+  ))
+
+# 5. Format like your slide example
+miss_gt <- miss_tbl %>%
+  mutate(
+    n_complete      = comma(n_complete),
+    n_missing       = comma(n_missing),
+    percent_missing = sprintf("%.1f%%", percent_missing)
+  ) %>%
+  gt() %>%
+  tab_header(title = "Missing Data Summary") %>%
+  cols_label(
+    Variable        = "Variable",
+    n_complete      = "n complete",
+    n_missing       = "n missing",
+    percent_missing = "Percent missing"
+  ) %>%
+  tab_options(
+    table.font.size           = 11,
+    column_labels.font.weight = "bold",
+    table.width               = px(700)
+  )
+
+miss_gt
+# gtsave(miss_gt, "missing_data_summary.png")
+```
+
+```{r}
+library(survey)
+library(broom)
+library(dplyr)
+
+## crude model - only MetS
+logit_crude <- svyglm(
+  cancer_any ~ mets4_imp,
+  design = nhanes_design_imp,
+  family = quasibinomial()
+)
+
+## adjusted model - MetS + covariates
+logit_adj <- svyglm(
+  cancer_any ~ mets4_imp + age_cat + sex + race4,
+  design = nhanes_design_imp,
+  family = quasibinomial()
+)
+```
+
+```{r}
+# tidy crude
+crude_tab <- tidy(
+  logit_crude,
+  conf.int = TRUE,
+  exponentiate = TRUE
+) %>%
+  filter(term == "mets4_imp") %>%
+  transmute(
+    Variable = "Metabolic syndrome (≥3 of 4 components)",
+    crude_or = estimate,
+    crude_lci = conf.low,
+    crude_uci = conf.high,
+    crude_p   = p.value
+  )
+
+# tidy adjusted
+adj_tab <- tidy(
+  logit_adj,
+  conf.int = TRUE,
+  exponentiate = TRUE
+) %>%
+  filter(term == "mets4_imp") %>%
+  transmute(
+    Variable = "Metabolic syndrome (≥3 of 4 components)",
+    adj_or = estimate,
+    adj_lci = conf.low,
+    adj_uci = conf.high,
+    adj_p   = p.value
+  )
+
+# join crude and adjusted
+table_crude_adj <- left_join(crude_tab, adj_tab, by = "Variable") %>%
+  mutate(
+    `Crude OR (95% CI)` = sprintf("%.2f (%.2f - %.2f)", crude_or, crude_lci, crude_uci),
+    `p (crude)`         = sprintf("%.3f", crude_p),
+    `Adjusted OR (95% CI)` = sprintf("%.2f (%.2f - %.2f)", adj_or, adj_lci, adj_uci),
+    `p (adjusted)`         = sprintf("%.3f", adj_p)
+  ) %>%
+  select(
+    Variable,
+    `Crude OR (95% CI)`,
+    `p (crude)`,
+    `Adjusted OR (95% CI)`,
+    `p (adjusted)`
+  )
+
+table_crude_adj
+knitr::kable(
+  table_crude_adj,
+  caption = "Crude and adjusted associations between metabolic syndrome and any cancer (NHANES 2021-2023).",
+  align = c("l", "c", "c", "c", "c")
+)
+```
+

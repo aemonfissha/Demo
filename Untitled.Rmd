@@ -1,0 +1,238 @@
+---
+title: "Sensitivity Analyisis MetS Lab"
+author: "Aemon"
+date: "2025-12-03"
+output: html_document
+---
+```{r}
+library(dplyr)
+
+# Here I am starting from the DEMO + BMX merged dataset (nhanes_basic)
+nhanes_clean <- nhanes_basic %>%
+  mutate(
+    # Here I am creating my working variables for age, sex, race, BMI, and waist
+    age   = RIDAGEYR,
+    sex   = factor(RIAGENDR, levels = c(1, 2), labels = c("Male", "Female")),
+    race  = factor(RIDRETH3),
+    bmi   = BMXBMI,
+    waist = BMXWAIST
+  )
+
+# Here I am merging in the cancer outcome and restricting to adults
+nhanes_analytic <- nhanes_clean %>%
+  left_join(mcq_cancer, by = "SEQN") %>%
+  filter(age >= 20)
+```
+
+```{r}
+library(haven)
+library(dplyr)
+library(janitor)
+
+# Here I am importing the HDL lab file and keeping SEQN and HDL (mg/dL)
+hdl_raw  <- read_xpt("data_raw/HDL_L.XPT")
+hdl      <- hdl_raw %>%
+  select(SEQN, LBDHDD)
+
+# Here I am importing the triglyceride lab file
+trig_raw <- read_xpt("data_raw/TRIG_L.XPT")
+trig     <- trig_raw %>%
+  select(SEQN, LBXTLG)
+
+# Here I am importing the fasting glucose lab file
+glu_raw  <- read_xpt("data_raw/GLU_L.XPT")
+glu      <- glu_raw %>%
+  select(SEQN, LBXGLU)
+
+# Here I am joining labs and creating age_cat inside this object
+nhanes_lab <- nhanes_analytic %>%
+  select(
+    SEQN,
+    age,
+    sex,
+    race4,
+    waist,
+    cancer_any,
+    SDMVPSU,
+    SDMVSTRA,
+    WTMEC2YR
+  ) %>%
+  # Here I am recreating age_cat so this file is self contained
+  mutate(
+    age_cat = cut(
+      age,
+      breaks = c(20, 40, 60, 80, Inf),
+      right  = FALSE,
+      labels = c("20-39", "40-59", "60-79", "80+")
+    )
+  ) %>%
+  left_join(hdl,  by = "SEQN") %>%
+  left_join(trig, by = "SEQN") %>%
+  left_join(glu,  by = "SEQN") %>%
+  mutate(
+    # Here I am defining central obesity from waist in cm, sex specific
+    waist_high_lab = case_when(
+      sex == "Male"   & !is.na(waist) & waist >= 102 ~ 1L,
+      sex == "Female" & !is.na(waist) & waist >= 88  ~ 1L,
+      sex %in% c("Male", "Female") & !is.na(waist)   ~ 0L,
+      TRUE ~ NA_integer_
+    ),
+
+    # Here I am creating a low HDL indicator using lab HDL only
+    low_hdl_lab = case_when(
+      sex == "Male"   & !is.na(LBDHDD) & LBDHDD < 40 ~ 1L,
+      sex == "Female" & !is.na(LBDHDD) & LBDHDD < 50 ~ 1L,
+      sex %in% c("Male", "Female") & !is.na(LBDHDD) ~ 0L,
+      TRUE ~ NA_integer_
+    ),
+
+    # Here I am creating a high triglyceride indicator (≥150 mg/dL)
+    trig_high_lab = case_when(
+      !is.na(LBXTLG) & LBXTLG >= 150 ~ 1L,
+      !is.na(LBXTLG) & LBXTLG < 150  ~ 0L,
+      TRUE ~ NA_integer_
+    ),
+
+    # Here I am creating a high fasting glucose indicator (≥100 mg/dL)
+    glu_high_lab = case_when(
+      !is.na(LBXGLU) & LBXGLU >= 100 ~ 1L,
+      !is.na(LBXGLU) & LBXGLU < 100  ~ 0L,
+      TRUE ~ NA_integer_
+    ),
+
+    # Here I am counting how many of the four lab components each person has
+    mets4_lab_count = waist_high_lab + low_hdl_lab + trig_high_lab + glu_high_lab,
+
+    # Here I am defining lab based MetS as having at least 3 of 4 lab components
+    mets4_lab = case_when(
+      !is.na(mets4_lab_count) & mets4_lab_count >= 3 ~ 1L,
+      !is.na(mets4_lab_count) & mets4_lab_count <  3 ~ 0L,
+      TRUE ~ NA_integer_
+    )
+  )
+
+# Here I am quickly checking the distribution of each component and the lab MetS variable
+tabyl(nhanes_lab$waist_high_lab)
+tabyl(nhanes_lab$low_hdl_lab)
+tabyl(nhanes_lab$trig_high_lab)
+tabyl(nhanes_lab$glu_high_lab)
+tabyl(nhanes_lab$mets4_lab)
+```
+
+```{r}
+nhanes_lab <- nhanes_analytic %>%
+  # must already have: waist_high, ht_bp, diab_dx, LBXGLU, LBDHDD, LBXTLG
+  mutate(
+    # central obesity you already created as waist_high
+    # Low HDL
+    low_hdl = case_when(
+      sex == "Male"   & LBDHDD < 40 ~ 1L,
+      sex == "Female" & LBDHDD < 50 ~ 1L,
+      sex %in% c("Male", "Female")  ~ 0L,
+      TRUE                          ~ NA_integer_
+    ),
+
+    # High triglycerides
+    trig_high = case_when(
+      !is.na(LBXTLG) & LBXTLG >= 150 ~ 1L,
+      !is.na(LBXTLG) & LBXTLG < 150  ~ 0L,
+      TRUE                           ~ NA_integer_
+    ),
+
+    # High glucose or diabetes
+    glu_high = case_when(
+      !is.na(LBXGLU) & LBXGLU >= 100 ~ 1L,
+      diab_dx == 1                  ~ 1L,
+      !is.na(LBXGLU) & LBXGLU < 100 & diab_dx == 0 ~ 0L,
+      TRUE                           ~ NA_integer_
+    ),
+
+    # 5 component MetS count and indicator
+    mets5_count = waist_high + ht_bp + low_hdl + trig_high + glu_high,
+    mets5       = case_when(
+      mets5_count >= 3 ~ 1L,
+      mets5_count <= 2 ~ 0L,
+      TRUE             ~ NA_integer_
+    )
+  )
+```
+
+
+```{r}
+library(haven)
+library(dplyr)
+
+# Check the HDL file once
+hdl_raw <- read_xpt("data_raw/HDL_L.XPT")
+names(hdl_raw)[1:20]   # look here in the Console
+
+# Suppose you see LBDHDD (if it’s a bit different, change it below)
+hdl <- hdl_raw %>%
+  select(SEQN, hdl_mgdl = LBDHDD)   # rename to hdl_mgdl on import
+
+# Triglycerides (you already have this working)
+trig_raw <- read_xpt("data_raw/TRIG_L.XPT")
+trig <- trig_raw %>%
+  select(SEQN, LBXTLG)
+
+# Start from nhanes_analytic and join both labs
+nhanes_lab <- nhanes_analytic %>%
+  left_join(hdl,  by = "SEQN") %>%
+  left_join(trig, by = "SEQN")
+```
+```{r}
+# 1. Restrict to adults with complete lab-based MetS and non-missing cancer outcome
+nhanes_lab_cc <- nhanes_lab %>%
+  filter(
+    age >= 20,
+    !is.na(cancer_any),
+    !is.na(mets4_lab)      # all four lab components observed
+  )
+
+nrow(nhanes_lab_cc)   # how many remain
+
+# 2. Build a survey design for the lab subsample
+# Ideally you would pull the correct fasting / lab subsample weight from the lab files
+# (for TG and fasting glucose that is often called WTSAF2YR or similar).
+# For a simple class sensitivity analysis you can still use WTMEC2YR but
+# clearly flag that as a limitation.
+
+nhanes_lab_design <- svydesign(
+  ids     = ~SDMVPSU,
+  strata  = ~SDMVSTRA,
+  weights = ~WTMEC2YR,   # or a lab-specific weight if you add it
+  nest    = TRUE,
+  data    = nhanes_lab_cc
+)
+
+# 3. Fit a parallel logistic model using lab-based MetS
+nhanes_logit_mets_lab <- svyglm(
+  cancer_any ~ mets4_lab + age_cat + sex + race4,
+  design = nhanes_lab_design,
+  family = quasibinomial()
+)
+
+broom::tidy(nhanes_logit_mets_lab, conf.int = TRUE, exponentiate = TRUE)
+```
+
+```{r}
+nhanes_clean <- nhanes_basic %>%
+  mutate(
+    age = RIDAGEYR,
+    sex  = factor(RIAGENDR, levels = c(1, 2), labels = c("Male", "Female")),
+    race = factor(RIDRETH3),
+    bmi  = BMXBMI,
+    waist = BMXWAIST
+  )
+```
+
+```{r}
+nhanes_analytic <- nhanes_clean %>%
+  left_join(mcq_cancer, by = "SEQN") %>%
+  filter(age >= 20)
+```
+
+```{r}
+
+```
+
